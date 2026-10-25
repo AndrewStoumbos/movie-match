@@ -49,7 +49,8 @@ jobs:
     uses: AndrewStoumbos/agent-pipeline/.github/workflows/agent-build.yml@v1
     with:
       mode: fix
-      pr_number: ${{ inputs.pr_number }}
+      # workflow_dispatch hands inputs over as strings; the reusable workflow wants a number
+      pr_number: ${{ fromJSON(format('{0}', inputs.pr_number)) }}
       feedback_run_id: ${{ inputs.feedback_run_id }}
       pipeline_repo: AndrewStoumbos/agent-pipeline
       pipeline_ref: v1
@@ -57,11 +58,12 @@ jobs:
 
   review:
     if: >-
-      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        && github.event.pull_request.user.login != 'github-actions[bot]')
       || (github.event_name == 'workflow_dispatch' && inputs.mode == 'review')
     uses: AndrewStoumbos/agent-pipeline/.github/workflows/agent-review.yml@v1
     with:
-      pr_number: ${{ github.event.pull_request.number || inputs.pr_number }}
+      pr_number: ${{ fromJSON(format('{0}', github.event.pull_request.number || inputs.pr_number)) }}
       pipeline_repo: AndrewStoumbos/agent-pipeline
       pipeline_ref: v1
     secrets: inherit
