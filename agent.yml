@@ -1,0 +1,67 @@
+name: agent
+
+# Builder/reviewer agent pipeline. All logic lives in AndrewStoumbos/agent-pipeline;
+# this file only decides WHEN to run it. Project settings: .agent-pipeline.yml
+
+on:
+  issues:
+    types: [labeled]                  # add the "agent:build" label to an issue to start the builder
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]   # every human PR gets an agent review
+  workflow_dispatch:                  # used by the pipeline itself to chain build -> review -> fix
+    inputs:
+      mode:
+        type: choice
+        options: [review, fix]
+        default: review
+      pr_number:
+        type: number
+        required: true
+      feedback_run_id:
+        type: string
+        default: ""
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  actions: write
+  statuses: write
+  id-token: write
+
+concurrency:
+  group: agent-${{ github.event.pull_request.number || inputs.pr_number || github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.event_name == 'issues' && github.event.label.name == 'agent:build'
+    uses: AndrewStoumbos/agent-pipeline/.github/workflows/agent-build.yml@v1
+    with:
+      mode: build
+      issue_number: ${{ github.event.issue.number }}
+      pipeline_repo: AndrewStoumbos/agent-pipeline
+      pipeline_ref: v1
+    secrets: inherit
+
+  fix:
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'fix'
+    uses: AndrewStoumbos/agent-pipeline/.github/workflows/agent-build.yml@v1
+    with:
+      mode: fix
+      pr_number: ${{ inputs.pr_number }}
+      feedback_run_id: ${{ inputs.feedback_run_id }}
+      pipeline_repo: AndrewStoumbos/agent-pipeline
+      pipeline_ref: v1
+    secrets: inherit
+
+  review:
+    if: >-
+      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+      || (github.event_name == 'workflow_dispatch' && inputs.mode == 'review')
+    uses: AndrewStoumbos/agent-pipeline/.github/workflows/agent-review.yml@v1
+    with:
+      pr_number: ${{ github.event.pull_request.number || inputs.pr_number }}
+      pipeline_repo: AndrewStoumbos/agent-pipeline
+      pipeline_ref: v1
+    secrets: inherit
