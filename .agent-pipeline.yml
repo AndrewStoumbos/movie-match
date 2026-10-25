@@ -1,0 +1,51 @@
+# .agent-pipeline.yml — builder/reviewer agent pipeline settings for movie-match
+# Pipeline: https://github.com/AndrewStoumbos/agent-pipeline
+
+language: rust
+version: "stable"
+setup: ""                   # no system deps; cargo fetches crates during the gates
+
+# Run before the reviewer on every round. Same checks as ci.yml, but clippy treats
+# warnings as errors so the agents can't leave lint debt behind.
+gates:
+  - name: format
+    run: cargo fmt --all -- --check
+  - name: clippy
+    run: cargo clippy --all-targets -- -D warnings
+  - name: tests
+    run: cargo test --all
+
+security:
+  semgrep: true             # static analysis on changed code
+  gitleaks: true            # catches a TMDB key committed by mistake
+
+models:
+  builder: claude-opus-5-5
+  # Fable 5.1 is included on Max. On Pro it runs on pay-as-you-go usage credits;
+  # if that's your plan, change this to claude-opus-5-5.
+  reviewer: claude-fable-5-1
+
+builder:
+  max_turns: 60
+  allowed_commands:
+    - "cargo build:*"
+    - "cargo check:*"
+    - "cargo test:*"
+    - "cargo fmt:*"
+    - "cargo clippy:*"
+
+review:
+  max_turns: 30
+  max_rounds: 3
+  block_on: [blocker, major]
+  auto_fix: agent_prs
+  ignore_paths: ["Cargo.lock"]
+  focus: |
+    movie-match is a Rust CLI that calls the TMDB API with a user's API key.
+    - The TMDB key must never be printed, logged, put in error messages, or committed.
+      reqwest errors include the request URL, and the key is currently a URL query
+      parameter, so any error path that surfaces a reqwest error can leak it.
+    - Tests must not make network calls; TMDB responses should be fixtures or mocks.
+    - Scoring must stay pure and deterministic, return 0-100, and handle empty input
+      (no liked movies, no genres) without panicking or dividing by zero.
+    - No `unwrap()`/`expect()` on data that comes from files, env vars or the network.

@@ -9,8 +9,8 @@ pub struct Config {
 impl Config {
     pub fn from_env() -> Result<Self> {
         dotenvy::dotenv().ok();
-        let tmdb_api_key = std::env::var("TMDB_API_KEY")
-            .context("TMDB_API_KEY is not set (see .env.example)")?;
+        let tmdb_api_key =
+            std::env::var("TMDB_API_KEY").context("TMDB_API_KEY is not set (see .env.example)")?;
         Ok(Self { tmdb_api_key })
     }
 }
