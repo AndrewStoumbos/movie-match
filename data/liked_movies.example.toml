@@ -1,0 +1,14 @@
+# Copy this file to liked_movies.toml and list movies you enjoy.
+# `year` is optional but helps pick the right movie when titles repeat.
+
+[[movies]]
+title = "Arrival"
+year = 2016
+
+[[movies]]
+title = "Knives Out"
+year = 2019
+
+[[movies]]
+title = "Spider-Man: Into the Spider-Verse"
+year = 2018

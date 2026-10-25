@@ -1,0 +1,8 @@
+# Rust build output
+/target
+
+# Secrets
+.env
+
+# Personal input (the .example version is committed)
+data/liked_movies.toml
