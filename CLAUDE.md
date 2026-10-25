@@ -8,9 +8,12 @@ movies the user likes. See README.md for the roadmap.
 - `src/lib.rs`    library root
 - `src/config.rs` settings from env / `.env` (`TMDB_API_KEY`)
 - `src/profile.rs` liked-movies file loading and `TasteProfile`
-- `src/scoring.rs` `score(profile, movie) -> u8` (0-100)
+- `src/features.rs` `MovieDetails` -> field-weighted tokens (`FieldWeights`)
+- `src/tfidf.rs`  `Idf` table, unit-length `Vector`, cosine similarity
+- `src/scoring.rs` `score(profile, movie) -> u8` (0-100): max cosine over liked movies
+- `src/recommend.rs` TMDB fetching and ranking (the only async/I/O outside `tmdb/`)
 - `src/tmdb/`     TMDB API client (`mod.rs`) and response types (`models.rs`)
-- `tests/`        integration tests
+- `tests/`        integration tests; builders in `tests/common/`, JSON in `tests/fixtures/`
 
 ## Commands
 - Build: `cargo build`
@@ -21,8 +24,8 @@ movies the user likes. See README.md for the roadmap.
 ## Rules
 - Never print, log, or include the TMDB API key in errors or test fixtures.
   Don't commit `.env` or `data/liked_movies.toml`.
-- Tests must not hit the network. Build `Movie` values directly (see `tests/scoring.rs`)
-  or use JSON fixtures for TMDB responses.
+- Tests must not hit the network. Build `MovieDetails` values with the builders in
+  `tests/common/` or use JSON fixtures for TMDB responses (`tests/fixtures/`).
 - Keep scoring functions pure: no I/O, no randomness.
 - Use `anyhow::Result` with `.context(...)` for errors; no `unwrap()`/`expect()` on
   file, env or network data.
