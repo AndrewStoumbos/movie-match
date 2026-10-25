@@ -2,7 +2,10 @@
 
 pub mod models;
 
-pub use models::Movie;
+pub use models::{Movie, MovieDetails, Page};
+
+use anyhow::{Context, Result};
+use serde::de::DeserializeOwned;
 
 const BASE_URL: &str = "https://api.themoviedb.org/3";
 
@@ -19,18 +22,53 @@ impl TmdbClient {
         }
     }
 
-    /// Movies releasing soon, from TMDB's `/movie/upcoming` endpoint.
-    pub async fn upcoming(&self) -> anyhow::Result<Vec<Movie>> {
-        let url = format!("{BASE_URL}/movie/upcoming");
-        let page: models::Page<Movie> = self
+    /// One page of movies releasing soon, from `/movie/upcoming`.
+    pub async fn upcoming(&self, page: u32) -> Result<Page<Movie>> {
+        self.get("/movie/upcoming", &[("page", page.to_string())])
+            .await
+    }
+
+    /// One page of currently popular movies, from `/movie/popular`.
+    pub async fn popular(&self, page: u32) -> Result<Page<Movie>> {
+        self.get("/movie/popular", &[("page", page.to_string())])
+            .await
+    }
+
+    /// TMDB's best match for `title`, optionally narrowed to a release year.
+    pub async fn search_movie(&self, title: &str, year: Option<u16>) -> Result<Option<Movie>> {
+        let mut params = vec![("query", title.to_string())];
+        if let Some(year) = year {
+            params.push(("primary_release_year", year.to_string()));
+        }
+        let page: Page<Movie> = self.get("/search/movie", &params).await?;
+        Ok(page.results.into_iter().next())
+    }
+
+    /// Genres, keywords and credits for one movie, fetched in a single request.
+    pub async fn movie_details(&self, id: u64) -> Result<MovieDetails> {
+        let params = [("append_to_response", "keywords,credits".to_string())];
+        self.get(&format!("/movie/{id}"), &params).await
+    }
+
+    /// GETs `path` and decodes the JSON body.
+    ///
+    /// The API key is sent as a query parameter and reqwest errors embed the request
+    /// URL, so every error is stripped of its URL before it can reach a message or log.
+    async fn get<T: DeserializeOwned>(&self, path: &str, params: &[(&str, String)]) -> Result<T> {
+        let response = self
             .http
-            .get(url)
+            .get(format!("{BASE_URL}{path}"))
             .query(&[("api_key", self.api_key.as_str())])
+            .query(params)
             .send()
-            .await?
-            .error_for_status()?
+            .await
+            .and_then(|r| r.error_for_status())
+            .map_err(reqwest::Error::without_url)
+            .with_context(|| format!("TMDB request to {path} failed"))?;
+        response
             .json()
-            .await?;
-        Ok(page.results)
+            .await
+            .map_err(reqwest::Error::without_url)
+            .with_context(|| format!("could not decode TMDB response from {path}"))
     }
 }

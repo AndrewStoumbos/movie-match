@@ -1,0 +1,39 @@
+{
+  "adult": false,
+  "id": 4242,
+  "imdb_id": "tt0000000",
+  "original_title": "Fixture Movie",
+  "overview": "A made-up movie in the shape of a TMDB /movie/{id}?append_to_response=keywords,credits response.",
+  "popularity": 12.5,
+  "release_date": "2026-11-20",
+  "runtime": 118,
+  "title": "Fixture Movie",
+  "vote_average": 0.0,
+  "vote_count": 0,
+  "genres": [
+    { "id": 878, "name": "Science Fiction" },
+    { "id": 18, "name": "Drama" }
+  ],
+  "keywords": {
+    "keywords": [
+      { "id": 4379, "name": "time travel" },
+      { "id": 9882, "name": "space" }
+    ]
+  },
+  "credits": {
+    "cast": [
+      { "id": 103, "name": "Third Billed", "character": "C", "order": 2 },
+      { "id": 101, "name": "Lead Actor", "character": "A", "order": 0 },
+      { "id": 102, "name": "Second Billed", "character": "B", "order": 1 },
+      { "id": 104, "name": "Fourth Billed", "character": "D", "order": 3 },
+      { "id": 105, "name": "Fifth Billed", "character": "E", "order": 4 },
+      { "id": 106, "name": "Sixth Billed", "character": "F", "order": 5 }
+    ],
+    "crew": [
+      { "id": 201, "name": "The Director", "department": "Directing", "job": "Director" },
+      { "id": 202, "name": "The Writer", "department": "Writing", "job": "Screenplay" },
+      { "id": 202, "name": "The Writer", "department": "Writing", "job": "Writer" },
+      { "id": 203, "name": "The Composer", "department": "Sound", "job": "Original Music Composer" }
+    ]
+  }
+}
