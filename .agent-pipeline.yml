@@ -20,9 +20,9 @@ security:
   gitleaks: true            # catches a TMDB key committed by mistake
 
 models:
-  # A different, stronger model reviews the builder's work. Both run on your
-  # subscription (Fable 5.1 would need usage credits on Pro; it's included on Max).
-  builder: claude-sonnet-5-5
+  builder: claude-opus-5-5
+  # Fable 5.1 is included on Max. On Pro it runs on pay-as-you-go usage credits;
+  # if that's your plan, change this to claude-opus-5-5.
   reviewer: claude-opus-5-5
 
 builder:
