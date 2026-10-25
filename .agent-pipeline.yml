@@ -23,7 +23,7 @@ models:
   builder: claude-opus-5-5
   # Fable 5.1 is included on Max. On Pro it runs on pay-as-you-go usage credits;
   # if that's your plan, change this to claude-opus-5-5.
-  reviewer: claude-fable-5-1
+  reviewer: claude-opus-5-5
 
 builder:
   max_turns: 60
