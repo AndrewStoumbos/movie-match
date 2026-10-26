@@ -14,10 +14,11 @@ movies the user likes. See README.md for the roadmap.
 - `src/features.rs` `MovieDetails` -> field-weighted tokens (`FieldWeights`) and labels
 - `src/tfidf.rs`  `Idf` table, unit-length `Vector`, cosine similarity
 - `src/scoring.rs` `score(profile, movie) -> u8` (0-100): predicted rating × 10 from the
-  movie's 20 most similar rated movies (`predict`: weights relative to the closest,
-  mean rating as prior scaled by 1 - closest similarity, all weights scaled by
-  confidence min(1, closest similarity / 0.08), neighbours among the user's bottom 40% of ratings
-  (`TasteProfile::is_low_rating`) x 0.7). `score_detailed` (with
+  movie's 20 most similar rated movies (`predict`: weight = (similarity / closest)^2
+  (`SIMILARITY_POWER`), x 0.7 for neighbours among the user's bottom 40% of ratings
+  (`TasteProfile::is_low_rating`); the weighted average is blended with the overall
+  average as (n x weighted + 5 x overall) / (n + 5) for n neighbours
+  (`OVERALL_SHRINK`), so exactly the overall average with none). `score_detailed` (with
   reasons), `explain` (for `--explain`), `rank`. Pure.
 - `src/cache.rs`  `DiskCache`: JSON files with expiry under `data/cache/` (gitignored).
   Callers save with `put_or_warn`: a failed cache write is a warning, not an error

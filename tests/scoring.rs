@@ -3,7 +3,7 @@ mod common;
 use common::{
     favourites, filler_dramas, movie, profile, rated, Spec, COMEDY, DRAMA, HORROR, ROMANCE,
 };
-use movie_match::scoring::{rank, score, score_detailed};
+use movie_match::scoring::{rank, score, score_detailed, OVERALL_SHRINK, SIMILARITY_POWER};
 use movie_match::tmdb::MovieDetails;
 
 fn comedy(id: u64, director: u64) -> MovieDetails {
@@ -129,40 +129,46 @@ fn unrelated_movie_gets_your_average_rating() {
 
 #[test]
 fn rare_shared_features_count_more_than_common_ones() {
-    let liked = [movie(
-        "Liked",
-        Spec {
-            genres: vec![DRAMA],
-            keywords: vec![500],
-            directors: vec![7],
-            ..Spec::default()
-        },
-    )];
-    let same_genre = movie(
-        "Same genre",
-        Spec {
-            genres: vec![DRAMA],
-            directors: vec![8],
-            ..Spec::default()
-        },
-    );
-    let same_director = movie(
-        "Same director",
-        Spec {
-            genres: vec![COMEDY],
-            directors: vec![7],
-            ..Spec::default()
-        },
-    );
-    let candidates = [same_genre.clone(), same_director.clone()];
-    // A low rating, so closer resemblance means a lower predicted score.
+    // Two rated dramas: one 2/10 by director 7, one 10/10 by director 8.
+    let drama = |id, director| {
+        movie(
+            "Drama",
+            Spec {
+                id,
+                genres: vec![DRAMA],
+                directors: vec![director],
+                ..Spec::default()
+            },
+        )
+    };
+    let low = drama(1, 7);
+    let high = drama(2, 8);
+    // Each candidate shares the common Drama genre with both, and a (rare)
+    // director with just one of them.
+    let like_low = drama(3, 7);
+    let like_high = drama(4, 8);
+    let candidates = [like_low.clone(), like_high.clone()];
     let p = profile(
-        &[rated(&liked[0], 2.0), rated(&horror(9, 99), 10.0)],
+        &[rated(&low, 2.0), rated(&high, 10.0)],
         &candidates,
         &filler_dramas(20),
     );
 
-    assert!(score(&p, &same_director) < score(&p, &same_genre));
+    let toward_low = movie_match::scoring::explain(&p, &like_low);
+    let toward_high = movie_match::scoring::explain(&p, &like_high);
+    assert_eq!(toward_low.neighbours.len(), 2);
+    // The shared director decides which rating dominates the weighted average.
+    assert!(
+        toward_low.neighbour_rating < 4.0,
+        "{}",
+        toward_low.neighbour_rating
+    );
+    assert!(
+        toward_high.neighbour_rating > 8.0,
+        "{}",
+        toward_high.neighbour_rating
+    );
+    assert!(score(&p, &like_low) < score(&p, &like_high));
 }
 
 #[test]
@@ -229,18 +235,25 @@ fn rank_skips_rated_movies_and_sorts_best_first() {
 }
 
 #[test]
-fn weak_matches_still_outweigh_the_average() {
-    // Shares only a common genre with a 2/10 movie; other ratings are high.
-    let disliked = movie(
-        "Disliked",
-        Spec {
-            id: 1,
-            genres: vec![DRAMA],
-            directors: vec![50],
-            keywords: vec![70, 71, 72],
-            ..Spec::default()
-        },
-    );
+fn several_weak_matches_outweigh_the_average() {
+    // Six 2/10 dramas and six 10/10 comedies: an overall average of 6.
+    let dramas = (0..6).map(|i| {
+        movie(
+            "Disliked drama",
+            Spec {
+                id: 100 + i,
+                genres: vec![DRAMA],
+                directors: vec![50 + i],
+                keywords: vec![70 + i],
+                ..Spec::default()
+            },
+        )
+    });
+    let rated_movies: Vec<_> = dramas
+        .map(|m| rated(&m, 2.0))
+        .chain((0..6).map(|i| rated(&comedy(200 + i, 300 + i), 10.0)))
+        .collect();
+    // Shares only the common Drama genre with the six dramas.
     let candidate = movie(
         "Candidate",
         Spec {
@@ -250,19 +263,14 @@ fn weak_matches_still_outweigh_the_average() {
         },
     );
     let p = profile(
-        &[
-            rated(&disliked, 2.0),
-            rated(&comedy(3, 10), 10.0),
-            rated(&comedy(4, 11), 10.0),
-        ],
+        &rated_movies,
         std::slice::from_ref(&candidate),
         &filler_dramas(10),
     );
 
-    // Average is 7.33, but the single 2/10 neighbour carries more weight than the
-    // average (which counts 2 x (1 - its similarity)), so the score lands well below.
+    // (6 × 2 + 5 × 6) / (6 + 5) = 3.8: well below the average of 6.
     let found = score(&p, &candidate);
-    assert!(found < 60, "{found}");
+    assert_eq!(found, 38);
 }
 
 #[test]
@@ -286,7 +294,7 @@ fn explain_lists_neighbours_with_relative_weights() {
 }
 
 #[test]
-fn one_faint_neighbour_barely_moves_the_score_from_the_average() {
+fn one_faint_neighbour_cannot_decide_the_score() {
     // Thirty rated movies averaging about 7. The candidate's only overlap is the
     // common Drama genre, shared with one 2/10 film among many dramas.
     let mut rated_movies: Vec<_> = (0..29)
@@ -326,14 +334,125 @@ fn one_faint_neighbour_barely_moves_the_score_from_the_average() {
         "test needs a faint match, got {}",
         explanation.neighbours[0].similarity
     );
-    let average = (explanation.mean_rating * 10.0).round() as i32;
-    let drop = average - i32::from(explanation.score);
-    // Without the confidence ramp this match would pull the score down ~17 points.
+    // With a single neighbour the prediction is mostly the overall average:
+    // (2 + OVERALL_SHRINK × average) / (1 + OVERALL_SHRINK).
+    let expected = (2.0 + OVERALL_SHRINK * explanation.mean_rating) / (1.0 + OVERALL_SHRINK);
     assert!(
-        drop <= 4,
-        "score {} vs average {average}",
-        explanation.score
+        (explanation.predicted_rating - expected).abs() < 1e-4,
+        "predicted {} vs expected {expected}",
+        explanation.predicted_rating
     );
+    assert!((explanation.overall_share - 5.0 / 6.0).abs() < 1e-6);
+    // The 2/10 match pulls the score down a little, nowhere near 20.
+    assert!(explanation.score >= 55, "score {}", explanation.score);
+}
+
+#[test]
+fn faint_matches_fall_back_on_the_neighbours_ratings_not_every_rating() {
+    // Ten dramas rated 9 and thirty comedies rated 3: an overall average of 4.5.
+    let dramas = (0..10).map(|i| {
+        movie(
+            "Drama",
+            Spec {
+                id: 100 + i,
+                genres: vec![DRAMA],
+                keywords: vec![300 + i],
+                directors: vec![400 + i],
+                ..Spec::default()
+            },
+        )
+    });
+    let rated_movies: Vec<_> = dramas
+        .map(|m| rated(&m, 9.0))
+        .chain((0..30).map(|i| rated(&comedy(500 + i, 600 + i), 3.0)))
+        .collect();
+    // The candidate shares only the common Drama genre with the rated dramas.
+    let candidate = movie(
+        "Candidate",
+        Spec {
+            id: 2,
+            genres: vec![DRAMA],
+            keywords: vec![900],
+            directors: vec![901],
+            ..Spec::default()
+        },
+    );
+    let p = profile(
+        &rated_movies,
+        std::slice::from_ref(&candidate),
+        &filler_dramas(40),
+    );
+
+    let explanation = movie_match::scoring::explain(&p, &candidate);
+    assert_eq!(explanation.neighbours.len(), 10);
+    assert!(
+        explanation.neighbours[0].similarity < 0.08,
+        "test needs faint matches, got {}",
+        explanation.neighbours[0].similarity
+    );
+    assert!((explanation.mean_rating - 4.5).abs() < 1e-4);
+    assert!((explanation.neighbour_rating - 9.0).abs() < 1e-4);
+    // (10 × 9 + 5 × 4.5) / (10 + 5): the dramas' ratings, not everything rated.
+    assert!(
+        (explanation.predicted_rating - 7.5).abs() < 1e-4,
+        "predicted {}",
+        explanation.predicted_rating
+    );
+    assert_eq!(explanation.score, 75);
+}
+
+#[test]
+fn closer_neighbours_count_by_similarity_squared() {
+    // A 10/10 movie sharing a director and a genre with the candidate, and a 2/10
+    // movie sharing only the genre.
+    let close = movie(
+        "Close",
+        Spec {
+            id: 1,
+            genres: vec![DRAMA],
+            directors: vec![7],
+            ..Spec::default()
+        },
+    );
+    let far = movie(
+        "Far",
+        Spec {
+            id: 2,
+            genres: vec![DRAMA],
+            directors: vec![8],
+            ..Spec::default()
+        },
+    );
+    let candidate = movie(
+        "Candidate",
+        Spec {
+            id: 3,
+            genres: vec![DRAMA],
+            directors: vec![7],
+            ..Spec::default()
+        },
+    );
+    let p = profile(
+        &[rated(&close, 10.0), rated(&far, 2.0)],
+        std::slice::from_ref(&candidate),
+        &filler_dramas(20),
+    );
+
+    let explanation = movie_match::scoring::explain(&p, &candidate);
+    let [first, second] = explanation.neighbours.as_slice() else {
+        panic!("expected two neighbours");
+    };
+    assert_eq!(first.title, "Close");
+    let ratio = second.similarity / first.similarity;
+    // The 2/10 movie is among the user's low ratings, which count 0.7 as much.
+    let expected = ratio.powi(SIMILARITY_POWER) * 0.7;
+    assert!(
+        (second.weight - expected).abs() < 1e-5,
+        "weight {} vs {expected}",
+        second.weight
+    );
+    let weighted = (10.0 + 2.0 * expected) / (1.0 + expected);
+    assert!((explanation.neighbour_rating - weighted).abs() < 1e-4);
 }
 
 #[test]

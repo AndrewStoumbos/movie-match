@@ -103,18 +103,19 @@ Run the tests with `cargo test`.
    separately, the 20 rated movies most similar to it are picked by similarity alone,
    whatever you rated them, so a sci-fi release is judged by your sci-fi-like ratings
    and a drama by your drama-like ones. Each neighbour's **weight** is its similarity
-   divided by the closest one's, so the closest counts 1.0 and the rest in proportion
-   (raw similarities between different films are tiny, often under 0.1). The score is
-   the weighted average rating × 10, with your average rating mixed in as a prior:
-   `(Σ weight × rating + prior × your average) / (Σ weight + prior)`, where
-   `prior = 2.0 × (1 − closest similarity)`. Every neighbour weight is also scaled by a
-   **confidence** of `min(1, closest similarity ÷ 0.08)`, so a release whose best match
-   is one trivial overlap stays close to your average instead of swinging toward that
-   one film's rating. Your **low ratings**, the bottom 40% of your own ratings (strictly
-   below the rating at the 40% mark, so ties don't count), count 30% less than equally
-   similar ones you rated higher. The line is relative to you: for a generous rater it
-   might be 8/10, for a harsh one 5/10. `--explain` prints yours. Near-identical matches barely use your average, and a release
-   sharing nothing gets exactly your average. Constants live in `scoring.rs`.
+   divided by the closest one's, **squared**: the closest counts 1.0, one half as
+   similar counts 0.25 (raw similarities between different films are tiny, often under
+   0.1, so only their ratios matter). Your **low ratings**, the bottom 40% of your own
+   ratings (strictly below the rating at the 40% mark, so ties don't count), count 30%
+   less than equally similar ones you rated higher. The line is relative to you: for a
+   generous rater it might be 8/10, for a harsh one 5/10.
+
+   The score is the weighted average of those neighbours' ratings × 10, blended with
+   your overall average only by **how many** neighbours there are:
+   `(n × weighted average + 5 × your overall average) / (n + 5)`. With the full 20
+   neighbours your overall average is a fifth of the score; with one stray overlap it's
+   most of it, so one film can't decide a score; a release sharing nothing gets exactly
+   your average. `--explain` prints the breakdown. Constants live in `scoring.rs`.
 5. **Explanation.** The output names the most similar liked movie and the three shared
    features that contributed most, plus the most similar disliked movie among the 20.
 
@@ -122,8 +123,9 @@ The upcoming and popular lists and the rarity table are the same for every user,
 they're built once (`Catalog`) and only the rated movies are per user. Movies you've
 rated are never recommended back to you.
 
-Scores are best read as a ranking: a score of 30 can already be a strong match, because
-two different movies rarely share many keywords and people.
+A score is your predicted rating out of 100, so it's on the same scale as your own
+ratings: if you rate most films 7+, most scores will be 70+ too. Read them as a
+ranking against each other.
 
 ## Project layout
 

@@ -966,14 +966,25 @@ fn explanation_view(ui: &mut egui::Ui, movie: &MovieDetails, explanation: &Expla
     });
     ui.add_space(10.0);
     section(ui, "How the score was predicted", |ui| {
-        ui.label(format!(
-            "Confidence {:.0}%: how much your most similar movies are trusted.",
-            explanation.confidence * 100.0
-        ));
-        ui.label(format!(
-            "Your average rating ({:.1}/10) counts as weight {:.2}.",
-            explanation.mean_rating, explanation.prior_weight
-        ));
+        if explanation.neighbours.is_empty() {
+            ui.label(format!(
+                "Nothing you've rated is similar, so the score is your overall average ({:.1}/10).",
+                explanation.mean_rating
+            ));
+        } else {
+            ui.label(format!(
+                "Your ratings of the {} movies below average {:.1}/10, with closer movies \
+                 counting far more: weight = (similarity / closest similarity)².",
+                explanation.neighbours.len(),
+                explanation.neighbour_rating
+            ));
+            ui.label(format!(
+                "Your overall average ({:.1}/10) makes up {:.0}% of the score; it counts \
+                 more when few movies are similar.",
+                explanation.mean_rating,
+                explanation.overall_share * 100.0
+            ));
+        }
         ui.label(format!(
             "Ratings below {}/10 (your bottom 40%) count 30% less.",
             rating_text(explanation.low_rating_cutoff)
@@ -981,7 +992,7 @@ fn explanation_view(ui: &mut egui::Ui, movie: &MovieDetails, explanation: &Expla
     });
     section(ui, "Most similar movies you've rated", |ui| {
         if explanation.neighbours.is_empty() {
-            ui.label("None share any features, so the score is your average rating.");
+            ui.label("None share any features with this movie.");
         }
         for (i, n) in explanation.neighbours.iter().enumerate() {
             ui.horizontal(|ui| {
