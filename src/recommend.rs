@@ -26,10 +26,12 @@ pub struct Resolved {
     /// Entries matched by title search, as (what was searched, what TMDB found).
     /// Worth double-checking: the top search result can be the wrong movie.
     pub searched: Vec<(String, String)>,
-    /// Entries TMDB search found nothing for.
+    /// Entries TMDB search found nothing for, or whose TMDB id TMDB doesn't have
+    /// (it answered 404).
     pub unmatched: Vec<String>,
-    /// The TMDB id found for each input movie, in input order (`None` if unmatched).
-    /// Saving these lets later runs skip the title searches.
+    /// The TMDB id found for each input movie, in input order (`None` if unmatched,
+    /// including a given id TMDB doesn't have). Saving these lets later runs skip
+    /// the title searches.
     pub ids: Vec<Option<u64>>,
 }
 
@@ -136,12 +138,24 @@ pub async fn resolve(fetcher: &Fetcher, movies: &[RatedMovie]) -> Result<Resolve
         }
     }
 
-    let details = fetcher.details(&ids).await?;
-    resolved.rated = details
-        .into_iter()
-        .zip(ratings)
-        .map(|(movie, rating)| RatedDetails { movie, rating })
-        .collect();
+    // An id TMDB answers 404 for (since removed, mistyped, or not a movie) counts as
+    // unmatched rather than failing, so one bad saved id can't break every run.
+    let details = fetcher.details_if_found(&ids).await?;
+    let mut missing = HashSet::new();
+    for ((&id, found), rating) in ids.iter().zip(details).zip(ratings) {
+        match found {
+            Some(movie) => resolved.rated.push(RatedDetails { movie, rating }),
+            None => {
+                missing.insert(id);
+            }
+        }
+    }
+    for (movie, id) in movies.iter().zip(&mut resolved.ids) {
+        if id.is_some_and(|id| missing.contains(&id)) {
+            *id = None;
+            resolved.unmatched.push(movie.label());
+        }
+    }
     Ok(resolved)
 }
 

@@ -25,10 +25,12 @@ movies the user likes. See README.md for the roadmap.
 - `src/fetch.rs`  `Fetcher`: TMDB client + cached movie details, keyed by
   `details_cache_key` (use it in tests, never a literal key). `details` fails on any
   failed id; `available_details` (used by the catalog) skips only ids TMDB answers
-  404 for (`tmdb::is_not_found`), with one summary warning, and fails on other errors
+  404 for (`tmdb::is_not_found`), with one summary warning, and fails on other errors;
+  `details_if_found` gives `None` per 404 and also fails on other errors
 - `src/catalog.rs` `Catalog`: shared upcoming/popular movies and IDF, same for every user
 - `src/recommend.rs` per-user steps: `resolve` ratings to TMDB (`Resolved::ids` per input,
-  in order), `rank_upcoming`, `explain_movie`. Futures must stay `Send` (the app runs them
+  in order; a given id TMDB answers 404 for becomes unmatched with id `None`, so one
+  stale id can't fail every run), `rank_upcoming`, `explain_movie`. Futures must stay `Send` (the app runs them
   on a multi-threaded runtime): stream over owned items, not references.
 - I/O lives only in `tmdb/`, `cache.rs`, `fetch.rs`, `catalog.rs`, `recommend.rs`.
 - `src/tmdb/`     TMDB API client (`mod.rs`) and response types (`models.rs`)
