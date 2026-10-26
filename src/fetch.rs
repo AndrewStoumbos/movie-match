@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use futures::stream::{self, StreamExt, TryStreamExt};
 
 use crate::cache::DiskCache;
-use crate::tmdb::{MovieDetails, TmdbClient};
+use crate::tmdb::{self, MovieDetails, TmdbClient};
 
 /// How many TMDB requests to run at once. Well under TMDB's rate limit.
 pub const CONCURRENT_REQUESTS: usize = 8;
@@ -42,29 +42,48 @@ impl Fetcher {
             .await
     }
 
-    /// Details for each id that loads, in the same order. A movie whose details
-    /// fail to load (say TMDB has since removed it) is skipped with a warning on
-    /// stderr, so one bad id in a cached list doesn't fail every run. Fails only if
-    /// none of the ids load, which points at a wider problem like no network.
+    /// Details for each id TMDB still has, in the same order. A movie TMDB answers
+    /// 404 for (say it has since removed it) is skipped, with one summary warning on
+    /// stderr, so a stale id in a cached list doesn't fail every run. Any other
+    /// error, such as a timeout, rate limit or server error, fails the call, so a
+    /// network blip can't quietly drop movies. Also fails if none of the ids load.
     pub async fn available_details(&self, ids: &[u64]) -> Result<Vec<MovieDetails>> {
+        // The outer `Result` is a real failure; the inner one a movie TMDB doesn't have.
         let results: Vec<Result<MovieDetails>> = stream::iter(ids)
-            .map(|&id| self.one_details(id))
+            .map(|&id| async move {
+                match self.one_details(id).await {
+                    Ok(movie) => Ok(Ok(movie)),
+                    Err(err) if tmdb::is_not_found(&err) => Ok(Err(err)),
+                    Err(err) => Err(err),
+                }
+            })
             .buffered(CONCURRENT_REQUESTS)
-            .collect()
-            .await;
+            .try_collect()
+            .await?;
         let mut movies = Vec::with_capacity(results.len());
-        let mut errors = Vec::new();
-        for result in results {
+        let mut skipped = Vec::new();
+        let mut first_error = None;
+        for (&id, result) in ids.iter().zip(results) {
             match result {
                 Ok(movie) => movies.push(movie),
-                Err(err) => errors.push(err),
+                Err(err) => {
+                    skipped.push(id.to_string());
+                    first_error.get_or_insert(err);
+                }
             }
         }
-        if movies.is_empty() && !errors.is_empty() {
-            return Err(errors.swap_remove(0));
+        if movies.is_empty() {
+            if let Some(err) = first_error {
+                return Err(err);
+            }
         }
-        for err in errors {
-            eprintln!("warning: skipping movie: {err:#}");
+        if !skipped.is_empty() {
+            eprintln!(
+                "warning: skipped {} of {} movies that TMDB no longer has (ids {})",
+                skipped.len(),
+                ids.len(),
+                skipped.join(", ")
+            );
         }
         Ok(movies)
     }

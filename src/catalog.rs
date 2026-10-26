@@ -68,7 +68,8 @@ impl Catalog {
             }
         };
         // The ids may be a day old, so a movie TMDB has removed since is skipped
-        // rather than failing every run until the cached list expires.
+        // rather than failing every run until the cached list expires. Any other
+        // failure fails the load, so a network blip can't skew the catalog.
         Ok(Self {
             upcoming: fetcher.available_details(&ids.upcoming).await?,
             reference: fetcher.available_details(&ids.reference).await?,

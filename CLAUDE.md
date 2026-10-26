@@ -21,7 +21,8 @@ movies the user likes. See README.md for the roadmap.
 - `src/cache.rs`  `DiskCache`: JSON files with expiry under `data/cache/` (gitignored).
   Callers save with `put_or_warn`: a failed cache write is a warning, not an error
 - `src/fetch.rs`  `Fetcher`: TMDB client + cached movie details. `details` fails on any
-  failed id; `available_details` (used by the catalog) warns and skips them
+  failed id; `available_details` (used by the catalog) skips only ids TMDB answers
+  404 for (`tmdb::is_not_found`), with one summary warning, and fails on other errors
 - `src/catalog.rs` `Catalog`: shared upcoming/popular movies and IDF, same for every user
 - `src/recommend.rs` per-user steps: `resolve` ratings to TMDB, `rank_upcoming`
 - I/O lives only in `tmdb/`, `cache.rs`, `fetch.rs`, `catalog.rs`, `recommend.rs`.
