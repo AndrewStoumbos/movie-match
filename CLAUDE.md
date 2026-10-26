@@ -7,11 +7,17 @@ movies the user likes. See README.md for the roadmap.
 - `src/main.rs`   CLI entry point (clap). Keep it thin; logic lives in the library.
 - `src/lib.rs`    library root
 - `src/config.rs` settings from env / `.env` (`TMDB_API_KEY`)
-- `src/profile.rs` liked-movies file loading and `TasteProfile`
-- `src/features.rs` `MovieDetails` -> field-weighted tokens (`FieldWeights`)
+- `src/profile.rs` `RatedMovie` ratings file (title or `tmdb_id`, rating 0.5-10) and
+  `TasteProfile` (liked >= 7, disliked <= 4, neutral only marks as seen)
+- `src/features.rs` `MovieDetails` -> field-weighted tokens (`FieldWeights`) and labels
 - `src/tfidf.rs`  `Idf` table, unit-length `Vector`, cosine similarity
-- `src/scoring.rs` `score(profile, movie) -> u8` (0-100): max cosine over liked movies
-- `src/recommend.rs` TMDB fetching and ranking (the only async/I/O outside `tmdb/`)
+- `src/scoring.rs` `score(profile, movie) -> u8` (0-100), `score_detailed` (with reasons),
+  `rank`. Pure.
+- `src/cache.rs`  `DiskCache`: JSON files with expiry under `data/cache/` (gitignored)
+- `src/fetch.rs`  `Fetcher`: TMDB client + cached movie details
+- `src/catalog.rs` `Catalog`: shared upcoming/popular movies and IDF, same for every user
+- `src/recommend.rs` per-user steps: `resolve` ratings to TMDB, `rank_upcoming`
+- I/O lives only in `tmdb/`, `cache.rs`, `fetch.rs`, `catalog.rs`, `recommend.rs`.
 - `src/tmdb/`     TMDB API client (`mod.rs`) and response types (`models.rs`)
 - `tests/`        integration tests; builders in `tests/common/`, JSON in `tests/fixtures/`
 

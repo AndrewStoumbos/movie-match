@@ -1,152 +1,108 @@
-//! Fetches everything needed from TMDB and ranks upcoming releases.
+//! The per-user steps: resolve a user's ratings to TMDB movies, then rank the
+//! shared catalog against them.
 
 use std::collections::HashSet;
 
 use anyhow::{Context, Result};
-use futures::stream::{self, StreamExt, TryStreamExt};
+use futures::stream::{self, StreamExt};
 
-use crate::features::{self, FieldWeights};
-use crate::profile::{LikedMovie, TasteProfile};
-use crate::scoring;
-use crate::tfidf::Idf;
-use crate::tmdb::{Movie, MovieDetails, Page, TmdbClient};
+use crate::catalog::{Catalog, CatalogOptions};
+use crate::features::FieldWeights;
+use crate::fetch::{Fetcher, CONCURRENT_REQUESTS};
+use crate::profile::{RatedDetails, RatedMovie, TasteProfile};
+use crate::scoring::{self, Ranked};
 
-/// How many TMDB requests to run at once. Well under TMDB's rate limit.
-const CONCURRENT_REQUESTS: usize = 8;
-
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct Options {
-    /// Pages of `/movie/upcoming` to rate (20 movies per page).
-    pub upcoming_pages: u32,
-    /// Pages of `/movie/popular` added to the IDF reference set.
-    pub reference_pages: u32,
+    pub catalog: CatalogOptions,
     pub weights: FieldWeights,
 }
 
-impl Default for Options {
-    fn default() -> Self {
-        Self {
-            upcoming_pages: 2,
-            reference_pages: 5,
-            weights: FieldWeights::default(),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct Ranked {
-    pub movie: MovieDetails,
-    pub score: u8,
-    pub closest_liked: Option<String>,
+/// A user's ratings matched to TMDB movies.
+#[derive(Debug, Clone, Default)]
+pub struct Resolved {
+    pub rated: Vec<RatedDetails>,
+    /// Entries matched by title search, as (what was searched, what TMDB found).
+    /// Worth double-checking: the top search result can be the wrong movie.
+    pub searched: Vec<(String, String)>,
+    /// Entries TMDB search found nothing for.
+    pub unmatched: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct Ranking {
-    /// The TMDB movies the liked-movies file resolved to.
-    pub liked: Vec<MovieDetails>,
-    /// Liked titles TMDB search found no match for.
-    pub unmatched: Vec<String>,
-    /// Upcoming releases, best match first.
+    pub resolved: Resolved,
+    /// Upcoming releases the user hasn't rated, best match first.
     pub ranked: Vec<Ranked>,
 }
 
+/// Ranks the catalog's upcoming releases for one user.
 pub async fn rank_upcoming(
-    client: &TmdbClient,
-    liked: &[LikedMovie],
+    fetcher: &Fetcher,
+    movies: &[RatedMovie],
     options: &Options,
 ) -> Result<Ranking> {
-    // Every id is fetched once, even if it shows up in several lists.
-    let mut seen = HashSet::new();
-    let mut liked_ids = Vec::new();
-    let mut unmatched = Vec::new();
-    let searches: Vec<_> = stream::iter(liked)
-        .map(|m| async move { (m, client.search_movie(&m.title, m.year).await) })
+    let catalog = Catalog::load(fetcher, options.catalog).await?;
+    let resolved = resolve(fetcher, movies).await?;
+    let profile = TasteProfile::new(
+        &resolved.rated,
+        catalog.idf(&options.weights),
+        options.weights,
+    );
+    let ranked = scoring::rank(&profile, &catalog.upcoming);
+    Ok(Ranking { resolved, ranked })
+}
+
+/// Matches each rated movie to TMDB (by id, or else by title search) and fetches
+/// its details. A movie listed twice keeps its first rating.
+pub async fn resolve(fetcher: &Fetcher, movies: &[RatedMovie]) -> Result<Resolved> {
+    let lookups: Vec<_> = stream::iter(movies)
+        .map(|movie| async move { (movie, lookup_id(fetcher, movie).await) })
         .buffered(CONCURRENT_REQUESTS)
         .collect()
         .await;
-    for (wanted, found) in searches {
-        let found = found.with_context(|| format!("searching TMDB for \"{}\"", wanted.title))?;
-        match found {
-            Some(movie) => {
-                if seen.insert(movie.id) {
-                    liked_ids.push(movie.id);
-                }
-            }
-            None => unmatched.push(wanted.title.clone()),
-        }
-    }
 
-    let upcoming_ids = list_ids(options.upcoming_pages, &mut seen, |p| client.upcoming(p)).await?;
-    let reference_ids = list_ids(options.reference_pages, &mut seen, |p| client.popular(p)).await?;
-
-    let liked = fetch_details(client, &liked_ids).await?;
-    let upcoming = fetch_details(client, &upcoming_ids).await?;
-    let reference = fetch_details(client, &reference_ids).await?;
-
-    let documents: Vec<_> = liked
-        .iter()
-        .chain(&upcoming)
-        .chain(&reference)
-        .map(|movie| features::extract(movie, &options.weights))
-        .collect();
-    let profile = TasteProfile::new(&liked, Idf::from_documents(&documents), options.weights);
-
-    let mut ranked: Vec<Ranked> = upcoming
-        .into_iter()
-        .map(|movie| {
-            let found = scoring::score_detailed(&profile, &movie);
-            Ranked {
-                score: found.score,
-                closest_liked: found.closest_liked.map(str::to_owned),
-                movie,
-            }
-        })
-        .collect();
-    ranked.sort_by(|a, b| {
-        b.score
-            .cmp(&a.score)
-            .then_with(|| a.movie.title.cmp(&b.movie.title))
-    });
-
-    Ok(Ranking {
-        liked,
-        unmatched,
-        ranked,
-    })
-}
-
-/// Ids from the first `pages` pages of a TMDB list, skipping any already in `seen`.
-async fn list_ids<F, Fut>(pages: u32, seen: &mut HashSet<u64>, fetch_page: F) -> Result<Vec<u64>>
-where
-    F: Fn(u32) -> Fut,
-    Fut: std::future::Future<Output = Result<Page<Movie>>>,
-{
+    let mut seen = HashSet::new();
     let mut ids = Vec::new();
-    for page in 1..=pages {
-        let page = fetch_page(page).await?;
-        let last_page = page.page >= page.total_pages;
-        ids.extend(
-            page.results
-                .iter()
-                .map(|m| m.id)
-                .filter(|id| seen.insert(*id)),
-        );
-        if last_page {
-            break;
+    let mut ratings = Vec::new();
+    let mut resolved = Resolved::default();
+    for (wanted, found) in lookups {
+        let found = found.with_context(|| format!("looking up \"{}\" on TMDB", wanted.label()))?;
+        let Some((id, search_match)) = found else {
+            resolved.unmatched.push(wanted.label());
+            continue;
+        };
+        if !seen.insert(id) {
+            continue;
+        }
+        ids.push(id);
+        ratings.push(wanted.rating());
+        if let Some(search_match) = search_match {
+            resolved.searched.push((wanted.label(), search_match));
         }
     }
-    Ok(ids)
+
+    let details = fetcher.details(&ids).await?;
+    resolved.rated = details
+        .into_iter()
+        .zip(ratings)
+        .map(|(movie, rating)| RatedDetails { movie, rating })
+        .collect();
+    Ok(resolved)
 }
 
-async fn fetch_details(client: &TmdbClient, ids: &[u64]) -> Result<Vec<MovieDetails>> {
-    stream::iter(ids)
-        .map(|&id| async move {
-            client
-                .movie_details(id)
-                .await
-                .with_context(|| format!("fetching details for TMDB movie {id}"))
-        })
-        .buffered(CONCURRENT_REQUESTS)
-        .try_collect()
-        .await
+/// The TMDB id for `movie`, plus a description of the match if a title search
+/// was needed to find it.
+async fn lookup_id(fetcher: &Fetcher, movie: &RatedMovie) -> Result<Option<(u64, Option<String>)>> {
+    if let Some(id) = movie.tmdb_id {
+        return Ok(Some((id, None)));
+    }
+    let Some(title) = movie.title.as_deref() else {
+        return Ok(None);
+    };
+    let found = fetcher.client().search_movie(title, movie.year).await?;
+    Ok(found.map(|m| {
+        let year = m.release_date.get(..4).unwrap_or("unknown year");
+        (m.id, Some(format!("{} ({year})", m.title)))
+    }))
 }

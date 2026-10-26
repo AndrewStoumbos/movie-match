@@ -68,3 +68,14 @@ fn vectors_are_unit_length_and_empty_features_give_empty_vectors() {
     assert!(empty.is_empty());
     assert_eq!(empty.cosine(&vector), 0.0);
 }
+
+#[test]
+fn labels_name_each_token() {
+    let labels = features::labels(&fixture(), &FieldWeights::default());
+
+    assert_eq!(labels["genre:878"], "genre Science Fiction");
+    assert_eq!(labels["kw:4379"], "keyword \"time travel\"");
+    assert_eq!(labels["dir:201"], "director The Director");
+    assert_eq!(labels["writer:202"], "writer The Writer");
+    assert_eq!(labels["cast:101"], "actor Lead Actor");
+}

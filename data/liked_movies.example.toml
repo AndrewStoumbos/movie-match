@@ -1,14 +1,27 @@
-# Copy this file to liked_movies.toml and list movies you enjoy.
-# `year` is optional but helps pick the right movie when titles repeat.
+# Copy this file to liked_movies.toml and list movies you've rated.
+#
+# Each entry needs a `title` or a `tmdb_id`:
+#   - `tmdb_id` is exact (it's the number in the movie's themoviedb.org URL).
+#   - `title` is looked up by search; add `year` to pick the right one.
+# `rating` goes from 0.5 to 10. Leave it out for favourites (counts as 10).
+#   7 and up: liked, pulls similar movies up.
+#   4 and down: disliked, pushes similar movies down.
+#   In between: neutral, only marks the movie as seen.
 
 [[movies]]
 title = "Arrival"
 year = 2016
 
 [[movies]]
-title = "Knives Out"
-year = 2019
+tmdb_id = 546554 # Knives Out
+rating = 9
 
 [[movies]]
 title = "Spider-Man: Into the Spider-Verse"
 year = 2018
+rating = 8.5
+
+[[movies]]
+title = "Transformers: Age of Extinction"
+year = 2014
+rating = 3

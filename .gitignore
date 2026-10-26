@@ -6,3 +6,6 @@
 
 # Personal input (the .example version is committed)
 data/liked_movies.toml
+
+# TMDB download cache
+data/cache/

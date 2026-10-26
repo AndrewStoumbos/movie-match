@@ -40,27 +40,65 @@ impl Default for FieldWeights {
     }
 }
 
+struct Token {
+    key: String,
+    weight: f32,
+    label: String,
+}
+
 /// Feature tokens for `movie`, each weighted by its field's importance.
 pub fn extract(movie: &MovieDetails, weights: &FieldWeights) -> Features {
     let mut features = Features::new();
-    // A person can hold the same job twice (e.g. "Screenplay" and "Writer"); keep the max.
-    let mut add = |token: String, weight: f32| {
-        let entry = features.entry(token).or_insert(0.0);
-        *entry = entry.max(weight);
+    for token in tokens(movie, weights) {
+        // A person can hold the same job twice (e.g. "Screenplay" and "Writer"); keep the max.
+        let entry = features.entry(token.key).or_insert(0.0);
+        *entry = entry.max(token.weight);
+    }
+    features
+}
+
+/// Human-readable names for `movie`'s tokens, e.g. `dir:137427` → `director Denis Villeneuve`.
+pub fn labels(movie: &MovieDetails, weights: &FieldWeights) -> BTreeMap<String, String> {
+    tokens(movie, weights)
+        .into_iter()
+        .map(|token| (token.key, token.label))
+        .collect()
+}
+
+fn tokens(movie: &MovieDetails, weights: &FieldWeights) -> Vec<Token> {
+    let mut tokens = Vec::new();
+    let mut add = |key: String, weight: f32, label: String| {
+        tokens.push(Token { key, weight, label });
     };
 
     for genre in &movie.genres {
-        add(format!("genre:{}", genre.id), weights.genre);
+        add(
+            format!("genre:{}", genre.id),
+            weights.genre,
+            format!("genre {}", genre.name),
+        );
     }
     for keyword in &movie.keywords.keywords {
-        add(format!("kw:{}", keyword.id), weights.keyword);
+        add(
+            format!("kw:{}", keyword.id),
+            weights.keyword,
+            format!("keyword \"{}\"", keyword.name),
+        );
     }
     for person in movie.crew_with_job("Director") {
-        add(format!("dir:{}", person.id), weights.director);
+        add(
+            format!("dir:{}", person.id),
+            weights.director,
+            format!("director {}", person.name),
+        );
     }
     for job in WRITER_JOBS {
         for person in movie.crew_with_job(job) {
-            add(format!("writer:{}", person.id), weights.writer);
+            add(
+                format!("writer:{}", person.id),
+                weights.writer,
+                format!("writer {}", person.name),
+            );
         }
     }
 
@@ -70,8 +108,9 @@ pub fn extract(movie: &MovieDetails, weights: &FieldWeights) -> Features {
         add(
             format!("cast:{}", actor.id),
             weights.cast / (i as f32 + 1.0),
+            format!("actor {}", actor.name),
         );
     }
 
-    features
+    tokens
 }
