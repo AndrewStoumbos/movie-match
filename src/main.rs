@@ -7,7 +7,7 @@ use movie_match::cache::DiskCache;
 use movie_match::catalog::CatalogOptions;
 use movie_match::config::Config;
 use movie_match::fetch::Fetcher;
-use movie_match::profile::{self, DISLIKED_UP_TO, LIKED_FROM};
+use movie_match::profile::{self, RatedMovie, DISLIKED_UP_TO, LIKED_FROM};
 use movie_match::recommend::{self, Options};
 use movie_match::tmdb::TmdbClient;
 
@@ -42,6 +42,11 @@ struct Cli {
     /// Don't read or write the cache at all.
     #[arg(long, conflicts_with = "refresh")]
     no_cache: bool,
+
+    /// Instead of ranking, show how one movie's score was predicted: its nearest
+    /// rated movies, their similarity and your rating. Any title TMDB can find works.
+    #[arg(long, value_name = "TITLE")]
+    explain: Option<String>,
 }
 
 #[tokio::main]
@@ -66,6 +71,9 @@ async fn main() -> Result<()> {
         },
         ..Options::default()
     };
+    if let Some(title) = &cli.explain {
+        return explain(&fetcher, &movies, &options, title).await;
+    }
     let ranking = recommend::rank_upcoming(&fetcher, &movies, &options).await?;
     let resolved = &ranking.resolved;
 
@@ -119,4 +127,43 @@ fn rating_text(rating: f32) -> String {
     } else {
         format!("{rating:.1}")
     }
+}
+
+async fn explain(
+    fetcher: &Fetcher,
+    movies: &[RatedMovie],
+    options: &Options,
+    title: &str,
+) -> Result<()> {
+    let Some((movie, explanation)) =
+        recommend::explain_movie(fetcher, movies, options, title).await?
+    else {
+        eprintln!("No movie found for \"{title}\"");
+        return Ok(());
+    };
+    println!(
+        "{} [{}]: score {} (predicted {:.2}/10)",
+        movie.title, movie.release_date, explanation.score, explanation.predicted_rating
+    );
+    println!(
+        "Nearest rated movies (weight = similarity relative to the closest; your average {:.2} counts as weight {:.2}):",
+        explanation.mean_rating, explanation.prior_weight
+    );
+    if explanation.neighbours.is_empty() {
+        println!("  none share any features, so the score is your average");
+    }
+    for (i, n) in explanation.neighbours.iter().enumerate() {
+        println!(
+            "  {:>2}. {}  (you rated {}/10)  similarity {:.3}, weight {:.2}",
+            i + 1,
+            n.title,
+            rating_text(n.rating),
+            n.similarity,
+            n.weight
+        );
+        if !n.shared.is_empty() {
+            println!("      shares: {}", n.shared.join(", "));
+        }
+    }
+    Ok(())
 }

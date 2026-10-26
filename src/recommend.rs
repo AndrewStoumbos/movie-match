@@ -10,7 +10,8 @@ use crate::catalog::{Catalog, CatalogOptions};
 use crate::features::FieldWeights;
 use crate::fetch::{Fetcher, CONCURRENT_REQUESTS};
 use crate::profile::{RatedDetails, RatedMovie, TasteProfile};
-use crate::scoring::{self, Ranked};
+use crate::scoring::{self, Explanation, Ranked};
+use crate::tmdb::MovieDetails;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Options {
@@ -51,6 +52,48 @@ pub async fn rank_upcoming(
     );
     let ranked = scoring::rank(&profile, &catalog.upcoming);
     Ok(Ranking { resolved, ranked })
+}
+
+/// Explains one movie's score for this user. `title` is matched against the
+/// upcoming releases first (ignoring case), then looked up with a TMDB search, so
+/// any movie works. `None` when nothing matches.
+pub async fn explain_movie(
+    fetcher: &Fetcher,
+    movies: &[RatedMovie],
+    options: &Options,
+    title: &str,
+) -> Result<Option<(MovieDetails, Explanation)>> {
+    let catalog = Catalog::load(fetcher, options.catalog).await?;
+    let movie = match catalog
+        .upcoming
+        .iter()
+        .find(|m| m.title.eq_ignore_ascii_case(title.trim()))
+    {
+        Some(movie) => movie.clone(),
+        None => {
+            let found = fetcher
+                .client()
+                .search_movie(title, None)
+                .await
+                .with_context(|| format!("searching TMDB for \"{title}\""))?;
+            let Some(found) = found else {
+                return Ok(None);
+            };
+            let mut details = fetcher.details(&[found.id]).await?;
+            match details.pop() {
+                Some(movie) => movie,
+                None => return Ok(None),
+            }
+        }
+    };
+    let resolved = resolve(fetcher, movies).await?;
+    let profile = TasteProfile::new(
+        &resolved.rated,
+        catalog.idf(&options.weights),
+        options.weights,
+    );
+    let explanation = scoring::explain(&profile, &movie);
+    Ok(Some((movie, explanation)))
 }
 
 /// Matches each rated movie to TMDB (by id, or else by title search) and fetches

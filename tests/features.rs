@@ -79,3 +79,23 @@ fn labels_name_each_token() {
     assert_eq!(labels["writer:202"], "writer The Writer");
     assert_eq!(labels["cast:101"], "actor Lead Actor");
 }
+
+#[test]
+fn tone_keywords_count_less_than_content_keywords() {
+    let mut movie = fixture();
+    movie
+        .keywords
+        .keywords
+        .push(movie_match::tmdb::models::Keyword {
+            id: 325815,
+            name: "Farcical".to_string(),
+        });
+    let weights = FieldWeights::default();
+    let tokens = features::extract(&movie, &weights);
+    let labels = features::labels(&movie, &weights);
+
+    assert_eq!(tokens["kw:325815"], weights.tone);
+    assert_eq!(tokens["kw:4379"], weights.keyword);
+    assert!(weights.tone < weights.keyword);
+    assert_eq!(labels["kw:325815"], "tone \"Farcical\"");
+}

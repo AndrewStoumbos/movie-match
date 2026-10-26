@@ -19,6 +19,8 @@ const WRITER_JOBS: [&str; 2] = ["Screenplay", "Writer"];
 pub struct FieldWeights {
     pub genre: f32,
     pub keyword: f32,
+    /// Keywords that describe a film's mood rather than its content (see [`TONE_KEYWORDS`]).
+    pub tone: f32,
     pub director: f32,
     pub writer: f32,
     /// Weight of the top-billed actor; the actor billed n-th gets `cast / n`.
@@ -30,14 +32,104 @@ pub struct FieldWeights {
 impl Default for FieldWeights {
     fn default() -> Self {
         Self {
-            genre: 1.0,
+            genre: 2.0,
             keyword: 1.5,
+            tone: 0.4,
             director: 3.0,
             writer: 2.0,
             cast: 2.0,
             cast_limit: 5,
         }
     }
+}
+
+/// TMDB mood tags ("aggressive", "farcical", …). They're rare, so rarity weighting
+/// would otherwise make two films that merely share a tone look alike.
+pub const TONE_KEYWORDS: &[&str] = &[
+    "absurd",
+    "admiring",
+    "adoring",
+    "aggressive",
+    "amused",
+    "angry",
+    "anxious",
+    "appreciative",
+    "approving",
+    "audacious",
+    "awestruck",
+    "bewildered",
+    "bold",
+    "callous",
+    "candid",
+    "cautionary",
+    "celebratory",
+    "cheerful",
+    "comforting",
+    "compassionate",
+    "complicated",
+    "condescending",
+    "critical",
+    "cruel",
+    "defiant",
+    "demeaning",
+    "depressing",
+    "derisive",
+    "disdainful",
+    "disheartening",
+    "dramatic",
+    "earnest",
+    "empathetic",
+    "enchanting",
+    "enthusiastic",
+    "exhilarated",
+    "familiar",
+    "farcical",
+    "frightened",
+    "grim",
+    "harsh",
+    "hilarious",
+    "hopeful",
+    "horrified",
+    "humorous",
+    "inspirational",
+    "intense",
+    "introspective",
+    "joyful",
+    "joyous",
+    "lighthearted",
+    "melancholy",
+    "melodramatic",
+    "mean spirited",
+    "mocking",
+    "nostalgic",
+    "optimistic",
+    "playful",
+    "powerful",
+    "provocative",
+    "reflective",
+    "sad",
+    "sarcastic",
+    "sentimental",
+    "serious",
+    "shocking",
+    "sincere",
+    "somber",
+    "suspenseful",
+    "sympathetic",
+    "tense",
+    "thoughtful",
+    "thrilling",
+    "tragic",
+    "urgent",
+    "vibrant",
+    "whimsical",
+    "witty",
+    "wry",
+    "zany",
+];
+
+fn is_tone_keyword(name: &str) -> bool {
+    TONE_KEYWORDS.contains(&name.trim().to_lowercase().as_str())
 }
 
 struct Token {
@@ -79,10 +171,15 @@ fn tokens(movie: &MovieDetails, weights: &FieldWeights) -> Vec<Token> {
         );
     }
     for keyword in &movie.keywords.keywords {
+        let (weight, kind) = if is_tone_keyword(&keyword.name) {
+            (weights.tone, "tone")
+        } else {
+            (weights.keyword, "keyword")
+        };
         add(
             format!("kw:{}", keyword.id),
-            weights.keyword,
-            format!("keyword \"{}\"", keyword.name),
+            weight,
+            format!("{kind} \"{}\"", keyword.name),
         );
     }
     for person in movie.crew_with_job("Director") {

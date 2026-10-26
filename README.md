@@ -23,8 +23,8 @@ ranks them with field-weighted TF-IDF similarity, explaining each match
 
    Each entry needs a `title` (plus `year` to pick the right one) or an exact `tmdb_id`,
    and an optional `rating` from 0.5 to 10. Unrated entries count as 10/10 favourites.
-   7 and up counts as liked, 4 and down as disliked, and anything in between only
-   marks the movie as seen. The example file shows every option.
+   Every rating counts: a release similar to movies you rated highly scores high, and
+   one similar to movies you rated low scores low. The example file shows every option.
 
 4. Run it:
 
@@ -36,7 +36,9 @@ ranks them with field-weighted TF-IDF similarity, explaining each match
    `--reference-pages 10` uses more popular movies to judge how rare each feature is,
    `-n 50` shows more results. Downloads are cached in `data/cache/` (upcoming and
    popular lists for a day, movie details for 3 days); `--refresh` re-downloads and
-   `--no-cache` skips the cache. See `cargo run -- --help`.
+   `--no-cache` skips the cache. `--explain "By Any Means"` shows how one movie's score
+   was worked out: its 20 nearest rated movies with similarity, weight, your rating
+   and shared features (any title TMDB can find works). See `cargo run -- --help`.
 
    Sample output:
 
@@ -52,18 +54,26 @@ Run the tests with `cargo test`.
 
 1. **Features.** Each movie becomes a set of labeled tokens from TMDB: genres, keywords,
    directors, writers and the top 5 billed actors (`genre:878`, `kw:4379`, `dir:137427`, …).
-2. **Field weights.** Each field has an importance: genre 1.0, keyword 1.5, director 3.0,
-   writer 2.0, lead actor 2.0 (the n-th billed actor gets 2.0 / n). See `FieldWeights`.
+2. **Field weights.** Each field has an importance: genre 2.0, keyword 1.5, director 3.0,
+   writer 2.0, lead actor 2.0 (the n-th billed actor gets 2.0 / n). TMDB's mood tags
+   ("aggressive", "farcical", …, see `TONE_KEYWORDS`) count only 0.4, since they describe
+   feel rather than content. See `FieldWeights`.
 3. **Rarity (IDF).** Each token is also weighted by how rare it is across the shared
    catalog (the upcoming releases plus a few pages of popular movies), using
    `ln((1 + N) / (1 + df)) + 1`. Sharing a director counts far more than sharing "Drama".
-4. **Similarity.** Every liked and disliked movie is kept as its own vector, so eclectic
-   tastes don't get averaged into mush. A release's score is
-   `similarity to the closest liked movie × (its rating / 10)`
-   `− 0.5 × similarity to the closest disliked movie × dislike strength`, clamped to 0–100.
-   Dislike strength runs from 0.25 at 4/10 to 1.0 at 1/10.
-5. **Explanation.** The output names the closest liked movie and the three shared
-   features that contributed most, plus the disliked movie that lowered the score.
+4. **Predicted rating.** Every rated movie is kept as its own vector. For each release
+   separately, the 20 rated movies most similar to it are picked by similarity alone,
+   whatever you rated them, so a sci-fi release is judged by your sci-fi-like ratings
+   and a drama by your drama-like ones. Each neighbour's **weight** is its similarity
+   divided by the closest one's, so the closest counts 1.0 and the rest in proportion
+   (raw similarities between different films are tiny, often under 0.1). The score is
+   the weighted average rating × 10, with your average rating mixed in as a prior:
+   `(Σ weight × rating + prior × your average) / (Σ weight + prior)`, where
+   `prior = 2.0 × (1 − closest similarity)`. Faint matches lean on your average,
+   near-identical ones barely do, and a release sharing nothing gets exactly your
+   average. Constants live in `scoring.rs`.
+5. **Explanation.** The output names the most similar liked movie and the three shared
+   features that contributed most, plus the most similar disliked movie among the 20.
 
 The upcoming and popular lists and the rarity table are the same for every user, so
 they're built once (`Catalog`) and only the rated movies are per user. Movies you've
