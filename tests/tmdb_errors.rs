@@ -9,6 +9,7 @@ mod common;
 use std::net::TcpListener;
 
 use common::tmdb::{local_client, serve_once, API_KEY as SECRET_KEY};
+use movie_match::tmdb::is_not_found;
 
 fn assert_key_not_leaked(err: &anyhow::Error) {
     for rendered in [
@@ -72,4 +73,28 @@ async fn connection_failure_does_not_leak_key() {
 
     assert!(format!("{err:#}").contains("/search/movie"));
     assert_key_not_leaked(&err);
+}
+
+#[tokio::test]
+async fn only_404_counts_as_not_found() {
+    let not_found = local_client(serve_once(
+        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+    ))
+    .movie_details(42)
+    .await
+    .expect_err("404 is an error")
+    .context("outer context");
+    assert!(is_not_found(&not_found), "{not_found:#}");
+
+    for response in [
+        "HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 8\r\nConnection: close\r\n\r\nnot json",
+    ] {
+        let err = local_client(serve_once(response))
+            .movie_details(42)
+            .await
+            .expect_err("request fails");
+        assert!(!is_not_found(&err), "{err:#}");
+    }
 }

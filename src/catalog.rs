@@ -62,14 +62,17 @@ impl Catalog {
             None => {
                 let ids = list_catalog(fetcher, options).await?;
                 if let Some(cache) = fetcher.cache() {
-                    cache.put(&key, &ids)?;
+                    cache.put_or_warn(&key, &ids);
                 }
                 ids
             }
         };
+        // The ids may be a day old, so a movie TMDB has removed since is skipped
+        // rather than failing every run until the cached list expires. Any other
+        // failure fails the load, so a network blip can't skew the catalog.
         Ok(Self {
-            upcoming: fetcher.details(&ids.upcoming).await?,
-            reference: fetcher.details(&ids.reference).await?,
+            upcoming: fetcher.available_details(&ids.upcoming).await?,
+            reference: fetcher.available_details(&ids.reference).await?,
         })
     }
 

@@ -9,6 +9,15 @@ use serde::de::DeserializeOwned;
 
 const BASE_URL: &str = "https://api.themoviedb.org/3";
 
+/// Whether `err` comes from TMDB answering 404 Not Found, meaning it has no such
+/// resource (say a movie it has since removed). Other failures, such as timeouts,
+/// rate limits, server errors or undecodable bodies, are not.
+pub fn is_not_found(err: &anyhow::Error) -> bool {
+    err.chain()
+        .filter_map(|e| e.downcast_ref::<reqwest::Error>())
+        .any(|e| e.status() == Some(reqwest::StatusCode::NOT_FOUND))
+}
+
 pub struct TmdbClient {
     http: reqwest::Client,
     api_key: String,
