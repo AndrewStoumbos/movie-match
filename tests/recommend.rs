@@ -7,11 +7,12 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use common::tmdb::{local_client, serve_once_recording};
+use common::tmdb::{local_client, serve_once, serve_once_recording};
 use common::{movie, Spec};
 use movie_match::cache::DiskCache;
-use movie_match::fetch::Fetcher;
-use movie_match::recommend::{explain_movie, Options};
+use movie_match::fetch::{details_cache_key, Fetcher};
+use movie_match::profile::RatedMovie;
+use movie_match::recommend::{explain_movie, resolve, Options, Resolved};
 use movie_match::tmdb::MovieDetails;
 
 /// A fresh, empty folder for one test.
@@ -41,7 +42,7 @@ fn cache_with_upcoming(dir: &Path, upcoming: &[MovieDetails]) -> DiskCache {
         .expect("write catalog");
     for m in upcoming {
         cache
-            .put(&format!("details/{}", m.id), m)
+            .put(&details_cache_key(m.id), m)
             .expect("write details");
     }
     cache
@@ -107,4 +108,65 @@ async fn search_fallback_sends_trimmed_title() {
     assert!(request.starts_with("GET /search/movie?"), "{request}");
     assert_eq!(query_param(&request), "Past Lives");
     let _ = fs::remove_dir_all(&dir);
+}
+
+/// Two ratings with saved TMDB ids: id 1 is cached, id 2 is fetched from a stand-in
+/// server that answers with `response`.
+async fn resolve_known_and_fetched(name: &str, response: &str) -> anyhow::Result<Resolved> {
+    let dir = temp_dir(name);
+    let known = movie(
+        "Known",
+        Spec {
+            id: 1,
+            ..Spec::default()
+        },
+    );
+    let cache = DiskCache::new(&dir);
+    cache
+        .put(&details_cache_key(known.id), &known)
+        .expect("write details");
+    let fetcher = Fetcher::new(local_client(serve_once(response)), Some(cache));
+    let movies = [
+        RatedMovie {
+            tmdb_id: Some(1),
+            title: Some("Known".into()),
+            rating: Some(8.0),
+            ..RatedMovie::default()
+        },
+        RatedMovie {
+            tmdb_id: Some(2),
+            title: Some("Gone".into()),
+            rating: Some(9.0),
+            ..RatedMovie::default()
+        },
+    ];
+    let result = resolve(&fetcher, &movies).await;
+    let _ = fs::remove_dir_all(&dir);
+    result
+}
+
+#[tokio::test]
+async fn a_saved_id_tmdb_does_not_have_counts_as_unmatched() {
+    let resolved = resolve_known_and_fetched(
+        "missing-id",
+        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+    )
+    .await
+    .expect("a 404 for one rating doesn't fail the others");
+
+    assert_eq!(resolved.rated.len(), 1);
+    assert_eq!(resolved.rated[0].movie.id, 1);
+    assert_eq!(resolved.unmatched, ["Gone"]);
+    assert_eq!(resolved.ids, [Some(1), None]);
+}
+
+#[tokio::test]
+async fn other_tmdb_errors_still_fail_resolving() {
+    let err = resolve_known_and_fetched(
+        "server-error",
+        "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+    )
+    .await
+    .expect_err("a server error must not quietly drop a rating");
+    assert!(format!("{err:#}").contains("500"), "{err:#}");
 }

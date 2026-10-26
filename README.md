@@ -6,9 +6,47 @@ Written in Rust. Movie data comes from [TMDB](https://www.themoviedb.org/).
 
 ## Status
 
-Working CLI. It matches your rated movies to TMDB, fetches upcoming releases, and
-ranks them with field-weighted TF-IDF similarity, explaining each match
+Working CLI and desktop app. It matches your rated movies to TMDB, fetches upcoming
+releases, and ranks them with field-weighted TF-IDF similarity, explaining each match
 (see [How scoring works](#how-scoring-works)). TMDB data is cached between runs.
+
+## Desktop app
+
+A Windows/macOS/Linux app with the same features as the CLI, no command line needed.
+
+1. Run it: download `movie-match.exe` from a GitHub release, or build it yourself:
+
+   ```bash
+   cargo run --release -p movie-match-app
+   ```
+
+2. **Settings:** paste your free TMDB API key (https://www.themoviedb.org/settings/api).
+   A `TMDB_API_KEY` in `.env` works too.
+3. **Import:** choose your Letterboxd `ratings.csv` (Letterboxd → Settings → Import &
+   Export → Export your data), or drag it onto the window. Star ratings are doubled to
+   the 1–10 scale. A movie-match `.toml` ratings file also works, and so does
+   `movie-match.exe path\to\ratings.csv` (or "Open with").
+
+Screens:
+- **Upcoming:** upcoming releases ranked for you, with posters, scores, the closest
+  movie you rated and why. Filter by title, show the top 20/50/all, **Reload** (reuse
+  downloads) or **Re-download** (fresh data from TMDB).
+- **Explain a movie:** any title, upcoming or not, with its predicted rating and the
+  rated movies behind it (the CLI's `--explain`).
+- **My ratings:** what each rating matched on TMDB. **Fix** a wrong or missing match by
+  pasting the TMDB link or id.
+- **Settings:** API key, how many pages of upcoming and popular movies to use, whether
+  to reuse downloads, and clearing downloaded data.
+
+Everything is kept on your computer in the app-data folder (`%APPDATA%\movie-match\data`
+on Windows): `settings.json` (including the API key), `ratings.json` (your imported
+ratings, with the TMDB ids found so later starts skip the title searches) and `cache/`.
+
+To make a downloadable build, `cargo build --release -p movie-match-app` produces a single
+`target/release/movie-match.exe`. Pushing a tag like `v0.1.0` runs
+`.github/workflows/release.yml`, which builds it on Windows and attaches it to a GitHub
+release. The exe isn't code-signed, so Windows SmartScreen or Smart App Control may warn
+before the first run.
 
 ## Getting started
 
@@ -91,11 +129,20 @@ two different movies rarely share many keywords and people.
 
 ```
 .
-├── Cargo.toml                  # crate metadata and dependencies
+├── Cargo.toml                  # library + CLI crate, and the workspace
+├── app/                        # desktop app crate (egui), builds movie-match.exe
+│   ├── assets/                 # icon.png (window), icon.ico (exe), make-icon.ps1
+│   ├── build.rs                # embeds icon.ico in the exe on Windows
+│   └── src/
+│       ├── main.rs             # window setup
+│       ├── app.rs              # state and screens
+│       ├── jobs.rs             # runs library calls in the background
+│       └── store.rs            # settings, ratings and cache in the app-data folder
 ├── src/
 │   ├── main.rs                 # CLI entry point
 │   ├── lib.rs                  # library root (modules below)
 │   ├── config.rs               # settings from env / .env
+│   ├── import.rs               # Letterboxd ratings.csv import
 │   ├── profile.rs              # ratings file + taste profile (liked / disliked)
 │   ├── features.rs             # movie -> field-weighted feature tokens + labels
 │   ├── tfidf.rs                # IDF table, vectors, cosine similarity
@@ -112,6 +159,8 @@ two different movies rarely share many keywords and people.
 │   ├── features.rs             # feature extraction and TF-IDF
 │   ├── profile.rs              # ratings file parsing and validation
 │   ├── cache.rs                # disk cache behaviour
+│   ├── import.rs               # Letterboxd CSV parsing
+│   ├── recommend.rs            # explain lookups against a local TMDB stand-in
 │   ├── tmdb_errors.rs          # TMDB errors never reveal the API key
 │   ├── tmdb_proxy.rs           # test clients bypass proxy env vars
 │   ├── common/                 # test movie builders, local TMDB stand-in server
@@ -119,6 +168,7 @@ two different movies rarely share many keywords and people.
 ├── data/
 │   └── liked_movies.example.toml
 ├── .github/workflows/ci.yml    # build, lint and test on every push
+├── .github/workflows/release.yml # Windows exe on every v* tag
 ├── .env.example
 └── .gitignore
 ```
@@ -130,8 +180,11 @@ two different movies rarely share many keywords and people.
 - [x] Cache TMDB details and the shared catalog so repeat runs are faster
 - [x] Ratings, with disliked movies lowering the score
 - [x] Explain each score
-- [ ] Import ratings from Trakt and Letterboxd
-- [ ] General recommendations and title search
+- [x] Import Letterboxd ratings
+- [x] Desktop app
+- [x] Title search ("Explain a movie")
+- [ ] Import from Trakt
+- [ ] General recommendations (released movies you haven't seen)
 - [ ] Tune field weights against MovieLens ratings
 - [ ] Plot-summary similarity (text embeddings)
 - [ ] Optional LLM pass for nuanced scores with a short explanation

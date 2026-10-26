@@ -36,9 +36,26 @@ pub struct MovieDetails {
     pub keywords: Keywords,
     #[serde(default)]
     pub credits: Credits,
+    /// Plot summary. TMDB sends an empty string or null when there isn't one.
+    #[serde(default)]
+    pub overview: Option<String>,
+    /// Path of the poster image, e.g. `/abc123.jpg`; see [`MovieDetails::poster_url`].
+    #[serde(default)]
+    pub poster_path: Option<String>,
 }
 
+/// Base address of TMDB's image server.
+const IMAGE_BASE_URL: &str = "https://image.tmdb.org/t/p";
+
 impl MovieDetails {
+    /// Full URL of the poster at a TMDB size such as `"w185"`, if the movie has one.
+    pub fn poster_url(&self, size: &str) -> Option<String> {
+        self.poster_path
+            .as_deref()
+            .filter(|path| !path.is_empty())
+            .map(|path| format!("{IMAGE_BASE_URL}/{size}{path}"))
+    }
+
     /// Crew members credited with `job` (e.g. "Director"), in credit order.
     pub fn crew_with_job<'a>(&'a self, job: &'a str) -> impl Iterator<Item = &'a CrewMember> {
         self.credits.crew.iter().filter(move |c| c.job == job)

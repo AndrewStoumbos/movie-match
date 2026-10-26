@@ -9,7 +9,7 @@ use common::tmdb::{local_client, serve_once};
 use common::{movie, Spec};
 use movie_match::cache::DiskCache;
 use movie_match::catalog::{Catalog, CatalogOptions};
-use movie_match::fetch::Fetcher;
+use movie_match::fetch::{details_cache_key, Fetcher};
 use movie_match::tmdb::MovieDetails;
 
 const NOT_FOUND: &str = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
@@ -40,7 +40,7 @@ fn cache_with_catalog(dir: &Path, upcoming_ids: &[u64], cached: &[MovieDetails])
         .expect("write catalog");
     for m in cached {
         cache
-            .put(&format!("details/{}", m.id), m)
+            .put(&details_cache_key(m.id), m)
             .expect("write details");
     }
     cache

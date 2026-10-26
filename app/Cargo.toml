@@ -1,0 +1,25 @@
+[package]
+name = "movie-match-app"
+version = "0.1.0"
+edition = "2021"
+description = "Desktop app for movie-match: import Letterboxd ratings and see how much you'll like upcoming movies."
+
+[[bin]]
+name = "movie-match"
+path = "src/main.rs"
+
+[dependencies]
+movie-match = { path = ".." }
+anyhow = "1"
+directories = "6"
+dotenvy = "0.15"
+eframe = "0.37"
+egui_extras = { version = "0.37", features = ["http", "image"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+rfd = "0.17"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread"] }
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"

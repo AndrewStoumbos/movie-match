@@ -35,8 +35,9 @@ impl Fetcher {
 
     /// Details for each id, in the same order. Cached details skip the network.
     pub async fn details(&self, ids: &[u64]) -> Result<Vec<MovieDetails>> {
-        stream::iter(ids)
-            .map(|&id| self.one_details(id))
+        // Owned ids keep the futures `Send` (see `recommend::resolve`).
+        stream::iter(ids.to_vec())
+            .map(|id| self.one_details(id))
             .buffered(CONCURRENT_REQUESTS)
             .try_collect()
             .await
@@ -48,18 +49,7 @@ impl Fetcher {
     /// error, such as a timeout, rate limit or server error, fails the call, so a
     /// network blip can't quietly drop movies. Also fails if none of the ids load.
     pub async fn available_details(&self, ids: &[u64]) -> Result<Vec<MovieDetails>> {
-        // The outer `Result` is a real failure; the inner one a movie TMDB doesn't have.
-        let results: Vec<Result<MovieDetails>> = stream::iter(ids)
-            .map(|&id| async move {
-                match self.one_details(id).await {
-                    Ok(movie) => Ok(Ok(movie)),
-                    Err(err) if tmdb::is_not_found(&err) => Ok(Err(err)),
-                    Err(err) => Err(err),
-                }
-            })
-            .buffered(CONCURRENT_REQUESTS)
-            .try_collect()
-            .await?;
+        let results = self.details_or_not_found(ids).await?;
         let mut movies = Vec::with_capacity(results.len());
         let mut skipped = Vec::new();
         let mut first_error = None;
@@ -88,8 +78,33 @@ impl Fetcher {
         Ok(movies)
     }
 
+    /// Details for each id, in the same order, with `None` for ids TMDB answers 404
+    /// for (removed, or never a movie). Any other error fails the call, like
+    /// [`Self::available_details`].
+    pub async fn details_if_found(&self, ids: &[u64]) -> Result<Vec<Option<MovieDetails>>> {
+        let results = self.details_or_not_found(ids).await?;
+        Ok(results.into_iter().map(Result::ok).collect())
+    }
+
+    /// Each id's details, in order. The outer `Result` is a real failure; an inner
+    /// `Err` is a movie TMDB doesn't have (a 404).
+    async fn details_or_not_found(&self, ids: &[u64]) -> Result<Vec<Result<MovieDetails>>> {
+        // Owned ids keep the futures `Send` (see `recommend::resolve`).
+        stream::iter(ids.to_vec())
+            .map(|id| async move {
+                match self.one_details(id).await {
+                    Ok(movie) => Ok(Ok(movie)),
+                    Err(err) if tmdb::is_not_found(&err) => Ok(Err(err)),
+                    Err(err) => Err(err),
+                }
+            })
+            .buffered(CONCURRENT_REQUESTS)
+            .try_collect()
+            .await
+    }
+
     async fn one_details(&self, id: u64) -> Result<MovieDetails> {
-        let key = format!("details/{id}");
+        let key = details_cache_key(id);
         if let Some(movie) = self.cache().and_then(|c| c.get(&key, DETAILS_MAX_AGE)) {
             return Ok(movie);
         }
@@ -103,4 +118,10 @@ impl Fetcher {
         }
         Ok(movie)
     }
+}
+
+/// The cache key for one movie's details.
+pub fn details_cache_key(id: u64) -> String {
+    // v2: details now keep the overview and poster; older entries lack them.
+    format!("details-v2/{id}")
 }
