@@ -145,16 +145,25 @@ async fn explain(
         "{} [{}]: score {} (predicted {:.2}/10)",
         movie.title, movie.release_date, explanation.score, explanation.predicted_rating
     );
-    println!(
-        "Nearest rated movies (weight = similarity relative to the closest x confidence {:.2}; your average {:.2} counts as weight {:.2}):",
-        explanation.confidence, explanation.mean_rating, explanation.prior_weight
-    );
+    if !explanation.neighbours.is_empty() {
+        println!(
+            "Weighted average of these movies: {:.2}; your overall average {:.2} makes up {:.0}% of the score ({} neighbours).",
+            explanation.neighbour_rating,
+            explanation.mean_rating,
+            explanation.overall_share * 100.0,
+            explanation.neighbours.len()
+        );
+        println!("Nearest rated movies (weight = (similarity / closest similarity)²):");
+    }
     println!(
         "Your bottom 40% of ratings (below {}/10) count 30% less.",
         rating_text(explanation.low_rating_cutoff)
     );
     if explanation.neighbours.is_empty() {
-        println!("  none share any features, so the score is your average");
+        println!(
+            "  none share any features, so the score is your overall average ({:.2})",
+            explanation.mean_rating
+        );
     }
     for (i, n) in explanation.neighbours.iter().enumerate() {
         println!(

@@ -1,8 +1,10 @@
 //! Scores candidate movies against a taste profile.
 //!
-//! A candidate's score is a predicted rating: the similarity-weighted average of
-//! the user's ratings for the rated movies most similar to it (its "neighbours"),
-//! chosen by similarity alone, whatever the user rated them.
+//! A candidate's score is a predicted rating: an average of the user's ratings for
+//! the rated movies most similar to it (its "neighbours"), chosen by similarity
+//! alone, whatever the user rated them. Closer neighbours count more (by similarity
+//! squared), and the average leans toward the user's overall average only when
+//! there are few neighbours.
 
 use crate::features;
 use crate::profile::{RatedVector, TasteProfile};
@@ -12,16 +14,17 @@ use crate::tmdb::MovieDetails;
 /// How many of the most similar rated movies predict each candidate's rating.
 pub const NEIGHBOURS: usize = 20;
 
-/// How much the user's average rating counts in the prediction, in the same units
-/// as similarity. With weak neighbours the prediction stays near that average
-/// instead of trusting one faint match.
-pub const PRIOR_WEIGHT: f32 = 2.0;
+/// How sharply closer neighbours outweigh further ones: each neighbour's weight is
+/// `(similarity / closest similarity) ^ SIMILARITY_POWER`. With 2, a neighbour half as
+/// similar as the closest counts a quarter as much.
+pub const SIMILARITY_POWER: i32 = 2;
 
-/// A closest-neighbour similarity at or above this counts as a real match, so the
-/// neighbours get full weight. Below it their weight ramps down linearly, so one
-/// trivial overlap can't move a score far from the user's average. Typical best
-/// matches between different films are around 0.05 to 0.15.
-pub const CONFIDENT_SIMILARITY: f32 = 0.08;
+/// How many ratings at the user's overall average are blended into the neighbours'
+/// weighted average:
+/// `(neighbours × weighted average + OVERALL_SHRINK × overall average) / (neighbours + OVERALL_SHRINK)`.
+/// With the full 20 neighbours the overall average is a fifth of the prediction; with
+/// one neighbour it's most of it, so a single overlap can't decide a score.
+pub const OVERALL_SHRINK: f32 = 5.0;
 
 /// Weight multiplier for neighbours among the user's low ratings (their bottom
 /// 40%, see [`TasteProfile::is_low_rating`]), so a low rating moves a prediction 30%
@@ -35,7 +38,7 @@ const MAX_REASONS: usize = 3;
 #[derive(Debug, Clone)]
 pub struct Match<'a> {
     /// Predicted rating × 10: 0 to 100. Candidates sharing nothing with any rated
-    /// movie get the user's average rating × 10.
+    /// movie get the user's overall average rating × 10.
     pub score: u8,
     /// The most similar liked neighbour, if any.
     pub closest_liked: Option<&'a RatedVector>,
@@ -56,10 +59,9 @@ pub struct Neighbour<'a> {
     pub rated: &'a RatedVector,
     /// Cosine similarity to the candidate, 0.0 to 1.0.
     pub similarity: f32,
-    /// `similarity` divided by the closest neighbour's similarity, times the
-    /// prediction's confidence, times [`LOW_RATING_IMPACT`] for low ratings. With a
-    /// confident match the closest counts 1.0 (0.7 if a low rating) and the rest count
-    /// in proportion.
+    /// `(similarity / closest similarity) ^ SIMILARITY_POWER`, times
+    /// [`LOW_RATING_IMPACT`] for low ratings. The closest counts 1.0 (0.7 if a low
+    /// rating); one half as similar counts 0.25.
     pub weight: f32,
 }
 
@@ -68,11 +70,11 @@ pub struct Neighbour<'a> {
 pub struct Prediction<'a> {
     /// Most similar first, at most [`NEIGHBOURS`].
     pub neighbours: Vec<Neighbour<'a>>,
-    /// How much the user's average rating counted, in neighbour-weight units.
-    pub prior_weight: f32,
-    /// `min(1, closest similarity / CONFIDENT_SIMILARITY)`: how much the neighbours
-    /// are trusted at all.
-    pub confidence: f32,
+    /// The neighbours' ratings averaged by [`Neighbour::weight`] (0 with no neighbours).
+    pub neighbour_rating: f32,
+    /// How much of the prediction is the user's overall average, 0.0 to 1.0:
+    /// `OVERALL_SHRINK / (neighbours + OVERALL_SHRINK)`, so 1.0 with no neighbours.
+    pub overall_share: f32,
     /// Predicted rating, 0 to 10 (0 when nothing is rated).
     pub rating: f32,
 }
@@ -80,23 +82,24 @@ pub struct Prediction<'a> {
 /// Predicts the user's rating for `movie` from its own [`NEIGHBOURS`] most similar
 /// rated movies, picked by similarity alone:
 ///
-/// `(Σ weight × rating + prior × average rating) / (Σ weight + prior)`
+/// `weighted = Σ weight × rating / Σ weight`, with each weight
+/// `(similarity / closest) ^ SIMILARITY_POWER` (see [`Neighbour::weight`]), then
 ///
-/// Weights are similarities relative to the closest neighbour (see [`Neighbour::weight`]).
-/// Raw similarities between different films are small (often under 0.1), so without
-/// this the average rating would drown out the neighbours. How close that closest
-/// neighbour is still matters in two ways:
-/// - confidence: every weight is also scaled by `min(1, top / CONFIDENT_SIMILARITY)`,
-///   so a near-zero match barely moves the score from the average;
-/// - prior: `PRIOR_WEIGHT × (1 − top)`, so near-identical matches barely use the average.
+/// `(n × weighted + OVERALL_SHRINK × overall average) / (n + OVERALL_SHRINK)`
 ///
-/// Weights of neighbours among the user's low ratings are multiplied by [`LOW_RATING_IMPACT`].
+/// for `n` neighbours. So a movie is predicted from how the user rated the movies
+/// most like it, the closest counting far more, not from everything they've rated;
+/// only with few neighbours does it lean on the overall average, and with none it's
+/// exactly that average. Weights are relative to the closest neighbour because raw
+/// similarities between different films are small (often under 0.1) and only their
+/// ratios matter. Weights of neighbours among the user's low ratings are multiplied
+/// by [`LOW_RATING_IMPACT`].
 pub fn predict<'a>(profile: &'a TasteProfile, candidate: &Vector) -> Prediction<'a> {
     if profile.rated().is_empty() {
         return Prediction {
             neighbours: Vec::new(),
-            prior_weight: 0.0,
-            confidence: 0.0,
+            neighbour_rating: 0.0,
+            overall_share: 0.0,
             rating: 0.0,
         };
     }
@@ -111,7 +114,6 @@ pub fn predict<'a>(profile: &'a TasteProfile, candidate: &Vector) -> Prediction<
     found.truncate(NEIGHBOURS);
 
     let top = found.first().map_or(0.0, |(_, s)| *s);
-    let confidence = (top / CONFIDENT_SIMILARITY).min(1.0);
     let neighbours: Vec<Neighbour> = found
         .into_iter()
         .map(|(rated, similarity)| {
@@ -123,20 +125,21 @@ pub fn predict<'a>(profile: &'a TasteProfile, candidate: &Vector) -> Prediction<
             Neighbour {
                 rated,
                 similarity,
-                weight: similarity / top * confidence * impact,
+                weight: (similarity / top).powi(SIMILARITY_POWER) * impact,
             }
         })
         .collect();
 
-    // With no neighbours, top is 0 and the prediction is exactly the average.
-    let prior_weight = PRIOR_WEIGHT * (1.0 - top);
     let total: f32 = neighbours.iter().map(|n| n.weight).sum();
     let weighted: f32 = neighbours.iter().map(|n| n.weight * n.rated.rating).sum();
-    let rating = (weighted + prior_weight * profile.mean_rating()) / (total + prior_weight);
+    let neighbour_rating = if total > 0.0 { weighted / total } else { 0.0 };
+    // With no neighbours the share is 1 and the prediction is exactly the overall average.
+    let overall_share = OVERALL_SHRINK / (neighbours.len() as f32 + OVERALL_SHRINK);
+    let rating = (1.0 - overall_share) * neighbour_rating + overall_share * profile.mean_rating();
     Prediction {
         neighbours,
-        prior_weight,
-        confidence,
+        neighbour_rating,
+        overall_share,
         rating,
     }
 }
@@ -165,11 +168,13 @@ pub fn score_detailed<'a>(profile: &'a TasteProfile, movie: &MovieDetails) -> Ma
 pub struct Explanation {
     pub score: u8,
     pub predicted_rating: f32,
+    /// The user's overall average rating.
     pub mean_rating: f32,
-    /// How much `mean_rating` counted, in neighbour-weight units.
-    pub prior_weight: f32,
-    /// How much the neighbours were trusted, 0.0 to 1.0 (see [`Prediction::confidence`]).
-    pub confidence: f32,
+    /// The neighbours' ratings averaged by weight (see [`Prediction::neighbour_rating`]).
+    pub neighbour_rating: f32,
+    /// How much of the prediction is `mean_rating`, 0.0 to 1.0 (see
+    /// [`Prediction::overall_share`]).
+    pub overall_share: f32,
     /// Ratings below this are the user's low ratings and count 30% less.
     pub low_rating_cutoff: f32,
     pub neighbours: Vec<ExplainedNeighbour>,
@@ -208,8 +213,8 @@ pub fn explain(profile: &TasteProfile, movie: &MovieDetails) -> Explanation {
         score: to_score(prediction.rating),
         predicted_rating: prediction.rating,
         mean_rating: profile.mean_rating(),
-        prior_weight: prediction.prior_weight,
-        confidence: prediction.confidence,
+        neighbour_rating: prediction.neighbour_rating,
+        overall_share: prediction.overall_share,
         low_rating_cutoff: profile.low_rating_cutoff(),
         neighbours,
     }
