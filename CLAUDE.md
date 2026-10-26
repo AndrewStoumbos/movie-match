@@ -18,7 +18,8 @@ movies the user likes. See README.md for the roadmap.
   confidence min(1, closest similarity / 0.08), neighbours among the user's bottom 40% of ratings
   (`TasteProfile::is_low_rating`) x 0.7). `score_detailed` (with
   reasons), `explain` (for `--explain`), `rank`. Pure.
-- `src/cache.rs`  `DiskCache`: JSON files with expiry under `data/cache/` (gitignored)
+- `src/cache.rs`  `DiskCache`: JSON files with expiry under `data/cache/` (gitignored).
+  Callers save with `put_or_warn`: a failed cache write is a warning, not an error
 - `src/fetch.rs`  `Fetcher`: TMDB client + cached movie details
 - `src/catalog.rs` `Catalog`: shared upcoming/popular movies and IDF, same for every user
 - `src/recommend.rs` per-user steps: `resolve` ratings to TMDB, `rank_upcoming`

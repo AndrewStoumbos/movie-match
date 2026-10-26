@@ -53,7 +53,7 @@ impl Fetcher {
             .await
             .with_context(|| format!("fetching details for TMDB movie {id}"))?;
         if let Some(cache) = self.cache() {
-            cache.put(&key, &movie)?;
+            cache.put_or_warn(&key, &movie);
         }
         Ok(movie)
     }
