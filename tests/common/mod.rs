@@ -1,4 +1,10 @@
-//! Builders for test movies and profiles, so tests never need the network.
+//! Shared test helpers, so tests never need the network: builders for test movies
+//! and profiles here, and a local TMDB stand-in server and client in [`tmdb`].
+//!
+//! Every test file compiles its own copy of this module and uses only part of it.
+#![allow(dead_code)]
+
+pub mod tmdb;
 
 use movie_match::features::{self, FieldWeights};
 use movie_match::profile::{RatedDetails, TasteProfile};
