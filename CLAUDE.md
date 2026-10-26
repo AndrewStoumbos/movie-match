@@ -14,7 +14,9 @@ movies the user likes. See README.md for the roadmap.
 - `src/tfidf.rs`  `Idf` table, unit-length `Vector`, cosine similarity
 - `src/scoring.rs` `score(profile, movie) -> u8` (0-100): predicted rating × 10 from the
   movie's 20 most similar rated movies (`predict`: weights relative to the closest,
-  mean rating as prior scaled by 1 - closest similarity). `score_detailed` (with
+  mean rating as prior scaled by 1 - closest similarity, all weights scaled by
+  confidence min(1, closest similarity / 0.08), neighbours among the user's bottom 40% of ratings
+  (`TasteProfile::is_low_rating`) x 0.7). `score_detailed` (with
   reasons), `explain` (for `--explain`), `rank`. Pure.
 - `src/cache.rs`  `DiskCache`: JSON files with expiry under `data/cache/` (gitignored)
 - `src/fetch.rs`  `Fetcher`: TMDB client + cached movie details

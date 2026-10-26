@@ -110,8 +110,13 @@ pub struct TasteProfile {
     weights: FieldWeights,
     rated: Vec<RatedVector>,
     mean_rating: f32,
+    low_rating_cutoff: f32,
     rated_ids: HashSet<u64>,
 }
+
+/// Share of a user's ratings that count as their low ratings (see
+/// [`TasteProfile::is_low_rating`]).
+pub const LOW_RATING_SHARE: f32 = 0.4;
 
 impl TasteProfile {
     pub fn new(rated: &[RatedDetails], idf: Idf, weights: FieldWeights) -> Self {
@@ -133,8 +138,22 @@ impl TasteProfile {
             weights,
             rated: vectors,
             mean_rating,
+            low_rating_cutoff: low_rating_cutoff(rated),
             rated_ids: rated.iter().map(|r| r.movie.id).collect(),
         }
+    }
+
+    /// Whether `rating` is among this user's lowest [`LOW_RATING_SHARE`] of ratings:
+    /// strictly below their rating at that position, so ties at the cutoff don't
+    /// count and the share is never much more than 40%. Relative to the user, so a
+    /// generous rater's 6/10 can be low.
+    pub fn is_low_rating(&self, rating: f32) -> bool {
+        rating < self.low_rating_cutoff
+    }
+
+    /// Ratings below this are low ratings (see [`TasteProfile::is_low_rating`]).
+    pub fn low_rating_cutoff(&self) -> f32 {
+        self.low_rating_cutoff
     }
 
     pub fn rated(&self) -> &[RatedVector] {
@@ -159,4 +178,16 @@ impl TasteProfile {
     pub fn vectorize(&self, movie: &MovieDetails) -> Vector {
         Vector::new(&features::extract(movie, &self.weights), &self.idf)
     }
+}
+
+/// The rating at position `ceil(LOW_RATING_SHARE × n)` in ascending order. Ratings
+/// strictly below it are the user's low ratings. 0 (nothing is low) when unrated.
+fn low_rating_cutoff(rated: &[RatedDetails]) -> f32 {
+    let mut ratings: Vec<f32> = rated.iter().map(|r| r.rating).collect();
+    ratings.sort_by(f32::total_cmp);
+    let position = (LOW_RATING_SHARE * ratings.len() as f32).ceil() as usize;
+    ratings
+        .get(position.min(ratings.len().saturating_sub(1)))
+        .copied()
+        .unwrap_or(0.0)
 }

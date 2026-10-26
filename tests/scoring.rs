@@ -284,3 +284,115 @@ fn explain_lists_neighbours_with_relative_weights() {
     assert!(first.shared.contains(&"director Director 10".to_string()));
     assert!(explanation.neighbours[1].weight < 1.0);
 }
+
+#[test]
+fn one_faint_neighbour_barely_moves_the_score_from_the_average() {
+    // Thirty rated movies averaging about 7. The candidate's only overlap is the
+    // common Drama genre, shared with one 2/10 film among many dramas.
+    let mut rated_movies: Vec<_> = (0..29)
+        .map(|i| rated(&comedy(100 + i, 200 + i), 7.2))
+        .collect();
+    let bad = movie(
+        "Bad",
+        Spec {
+            id: 1,
+            genres: vec![DRAMA],
+            keywords: (300..330).collect(),
+            directors: vec![400],
+            cast: vec![500, 501, 502, 503, 504],
+        },
+    );
+    rated_movies.push(rated(&bad, 2.0));
+    let candidate = movie(
+        "Candidate",
+        Spec {
+            id: 2,
+            genres: vec![DRAMA],
+            keywords: vec![900, 901, 902],
+            directors: vec![901],
+            ..Spec::default()
+        },
+    );
+    let p = profile(
+        &rated_movies,
+        std::slice::from_ref(&candidate),
+        &filler_dramas(40),
+    );
+
+    let explanation = movie_match::scoring::explain(&p, &candidate);
+    assert_eq!(explanation.neighbours.len(), 1);
+    assert!(
+        explanation.neighbours[0].similarity < 0.02,
+        "test needs a faint match, got {}",
+        explanation.neighbours[0].similarity
+    );
+    let average = (explanation.mean_rating * 10.0).round() as i32;
+    let drop = average - i32::from(explanation.score);
+    // Without the confidence ramp this match would pull the score down ~17 points.
+    assert!(
+        drop <= 4,
+        "score {} vs average {average}",
+        explanation.score
+    );
+}
+
+#[test]
+fn bad_ratings_count_less_than_equally_similar_good_ones() {
+    // Equally similar to a 10/10 and a 1/10: without the reduced impact the
+    // prediction would be exactly the midpoint, 5.5.
+    let good = comedy(1, 10);
+    let bad = comedy(2, 20);
+    let candidate = movie(
+        "Candidate",
+        Spec {
+            id: 3,
+            genres: vec![COMEDY],
+            keywords: vec![1],
+            ..Spec::default()
+        },
+    );
+    let p = profile(
+        &[rated(&good, 10.0), rated(&bad, 1.0)],
+        std::slice::from_ref(&candidate),
+        &filler_dramas(5),
+    );
+
+    let explanation = movie_match::scoring::explain(&p, &candidate);
+    let weights: Vec<_> = explanation.neighbours.iter().map(|n| n.weight).collect();
+    assert_eq!(weights.len(), 2);
+    assert!((weights[1] - 0.7 * weights[0]).abs() < 1e-5, "{weights:?}");
+    assert!(explanation.predicted_rating > 5.5);
+}
+
+#[test]
+fn low_ratings_are_the_users_bottom_forty_percent() {
+    let ratings = [5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 10.0, 10.0, 10.0, 10.0];
+    let rated_movies: Vec<_> = ratings
+        .iter()
+        .zip(0..)
+        .map(|(&r, i)| rated(&comedy(i, 100 + i), r))
+        .collect();
+    let p = profile(&rated_movies, &[], &[]);
+
+    // The rating at position ceil(0.4 × 10) = 4 is 9, so 5 to 8 are low.
+    assert_eq!(p.low_rating_cutoff(), 9.0);
+    assert!(p.is_low_rating(8.0));
+    assert!(p.is_low_rating(6.0));
+    assert!(!p.is_low_rating(9.0));
+}
+
+#[test]
+fn ties_at_the_cutoff_are_not_low() {
+    // Mostly 8s: the cutoff lands on 8, and only the 6 is below it.
+    let ratings = [6.0, 8.0, 8.0, 8.0, 8.0];
+    let rated_movies: Vec<_> = ratings
+        .iter()
+        .zip(0..)
+        .map(|(&r, i)| rated(&comedy(i, 100 + i), r))
+        .collect();
+    let p = profile(&rated_movies, &[], &[]);
+
+    assert_eq!(p.low_rating_cutoff(), 8.0);
+    assert!(p.is_low_rating(6.0));
+    assert!(!p.is_low_rating(8.0));
+}

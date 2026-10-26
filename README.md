@@ -69,9 +69,14 @@ Run the tests with `cargo test`.
    (raw similarities between different films are tiny, often under 0.1). The score is
    the weighted average rating × 10, with your average rating mixed in as a prior:
    `(Σ weight × rating + prior × your average) / (Σ weight + prior)`, where
-   `prior = 2.0 × (1 − closest similarity)`. Faint matches lean on your average,
-   near-identical ones barely do, and a release sharing nothing gets exactly your
-   average. Constants live in `scoring.rs`.
+   `prior = 2.0 × (1 − closest similarity)`. Every neighbour weight is also scaled by a
+   **confidence** of `min(1, closest similarity ÷ 0.08)`, so a release whose best match
+   is one trivial overlap stays close to your average instead of swinging toward that
+   one film's rating. Your **low ratings**, the bottom 40% of your own ratings (strictly
+   below the rating at the 40% mark, so ties don't count), count 30% less than equally
+   similar ones you rated higher. The line is relative to you: for a generous rater it
+   might be 8/10, for a harsh one 5/10. `--explain` prints yours. Near-identical matches barely use your average, and a release
+   sharing nothing gets exactly your average. Constants live in `scoring.rs`.
 5. **Explanation.** The output names the most similar liked movie and the three shared
    features that contributed most, plus the most similar disliked movie among the 20.
 
