@@ -86,3 +86,51 @@ async fn catalog_fails_when_no_movie_loads() {
     assert!(message.contains("404"), "{message}");
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[tokio::test]
+async fn transient_error_fails_the_catalog_instead_of_skipping_the_movie() {
+    let dir = temp_dir("transient");
+    let kept = movie(
+        "Kept",
+        Spec {
+            id: 1,
+            ..Spec::default()
+        },
+    );
+    let cache = cache_with_catalog(&dir, &[kept.id, 2], std::slice::from_ref(&kept));
+    let unavailable =
+        "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    let fetcher = Fetcher::new(local_client(serve_once(unavailable)), Some(cache));
+
+    let err = Catalog::load(&fetcher, CatalogOptions::default())
+        .await
+        .expect_err("a 503 is not a removed movie");
+
+    let message = format!("{err:#}");
+    assert!(message.contains("TMDB movie 2"), "{message}");
+    assert!(message.contains("503"), "{message}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn undecodable_details_fail_the_catalog_instead_of_skipping_the_movie() {
+    let dir = temp_dir("undecodable");
+    let kept = movie(
+        "Kept",
+        Spec {
+            id: 1,
+            ..Spec::default()
+        },
+    );
+    let cache = cache_with_catalog(&dir, &[kept.id, 2], std::slice::from_ref(&kept));
+    let garbage = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 8\r\nConnection: close\r\n\r\nnot json";
+    let fetcher = Fetcher::new(local_client(serve_once(garbage)), Some(cache));
+
+    let err = Catalog::load(&fetcher, CatalogOptions::default())
+        .await
+        .expect_err("a bad body is not a removed movie");
+
+    let message = format!("{err:#}");
+    assert!(message.contains("could not decode"), "{message}");
+    let _ = fs::remove_dir_all(&dir);
+}
