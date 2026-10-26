@@ -2,6 +2,7 @@
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
+use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
 use movie_match::tmdb::TmdbClient;
@@ -12,9 +13,16 @@ pub const API_KEY: &str = "not-a-real-key-5ec7e7";
 /// Serves exactly one HTTP request on a loopback port with `response`, and returns
 /// the base URL to send it to.
 pub fn serve_once(response: impl Into<String>) -> String {
+    serve_once_recording(response).0
+}
+
+/// Like [`serve_once`], but also hands back the raw request head (request line and
+/// headers) once it has been received.
+pub fn serve_once_recording(response: impl Into<String>) -> (String, Receiver<String>) {
     let response = response.into();
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback listener");
     let addr = listener.local_addr().expect("listener address");
+    let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("accept connection");
         let mut request = Vec::new();
@@ -26,8 +34,9 @@ pub fn serve_once(response: impl Into<String>) -> String {
             }
         }
         let _ = stream.write_all(response.as_bytes());
+        let _ = sender.send(String::from_utf8_lossy(&request).into_owned());
     });
-    format!("http://{addr}")
+    (format!("http://{addr}"), receiver)
 }
 
 /// A client for the stand-in server at `base` that sends [`API_KEY`]. It ignores proxy
