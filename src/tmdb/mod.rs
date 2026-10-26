@@ -12,13 +12,21 @@ const BASE_URL: &str = "https://api.themoviedb.org/3";
 pub struct TmdbClient {
     http: reqwest::Client,
     api_key: String,
+    base_url: String,
 }
 
 impl TmdbClient {
     pub fn new(api_key: String) -> Self {
+        Self::with_base_url(api_key, BASE_URL.to_string())
+    }
+
+    /// A client that sends requests to `base_url` instead of the real TMDB API,
+    /// e.g. a local stand-in server in tests.
+    pub fn with_base_url(api_key: String, base_url: String) -> Self {
         Self {
             http: reqwest::Client::new(),
             api_key,
+            base_url,
         }
     }
 
@@ -57,7 +65,7 @@ impl TmdbClient {
     async fn get<T: DeserializeOwned>(&self, path: &str, params: &[(&str, String)]) -> Result<T> {
         let response = self
             .http
-            .get(format!("{BASE_URL}{path}"))
+            .get(format!("{}{path}", self.base_url))
             .query(&[("api_key", self.api_key.as_str())])
             .query(params)
             .send()
