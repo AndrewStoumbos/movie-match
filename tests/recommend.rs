@@ -10,7 +10,7 @@ use std::time::Duration;
 use common::tmdb::{local_client, serve_once_recording};
 use common::{movie, Spec};
 use movie_match::cache::DiskCache;
-use movie_match::fetch::Fetcher;
+use movie_match::fetch::{details_cache_key, Fetcher};
 use movie_match::recommend::{explain_movie, Options};
 use movie_match::tmdb::MovieDetails;
 
@@ -41,7 +41,7 @@ fn cache_with_upcoming(dir: &Path, upcoming: &[MovieDetails]) -> DiskCache {
         .expect("write catalog");
     for m in upcoming {
         cache
-            .put(&format!("details/{}", m.id), m)
+            .put(&details_cache_key(m.id), m)
             .expect("write details");
     }
     cache

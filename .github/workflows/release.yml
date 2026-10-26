@@ -1,0 +1,23 @@
+name: Release
+
+# Builds the desktop app for Windows and attaches movie-match.exe to a GitHub release
+# whenever a version tag like v0.1.0 is pushed.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p movie-match-app
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: target/release/movie-match.exe
+          generate_release_notes: true

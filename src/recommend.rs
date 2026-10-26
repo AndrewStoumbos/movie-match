@@ -28,6 +28,9 @@ pub struct Resolved {
     pub searched: Vec<(String, String)>,
     /// Entries TMDB search found nothing for.
     pub unmatched: Vec<String>,
+    /// The TMDB id found for each input movie, in input order (`None` if unmatched).
+    /// Saving these lets later runs skip the title searches.
+    pub ids: Vec<Option<u64>>,
 }
 
 #[derive(Debug, Clone)]
@@ -100,8 +103,13 @@ pub async fn explain_movie(
 /// Matches each rated movie to TMDB (by id, or else by title search) and fetches
 /// its details. A movie listed twice keeps its first rating.
 pub async fn resolve(fetcher: &Fetcher, movies: &[RatedMovie]) -> Result<Resolved> {
-    let lookups: Vec<_> = stream::iter(movies)
-        .map(|movie| async move { (movie, lookup_id(fetcher, movie).await) })
+    // Owned items (not references) keep these futures `Send`, so callers can run
+    // them on a multi-threaded runtime.
+    let lookups: Vec<_> = stream::iter(movies.to_vec())
+        .map(|movie| async move {
+            let found = lookup_id(fetcher, &movie).await;
+            (movie, found)
+        })
         .buffered(CONCURRENT_REQUESTS)
         .collect()
         .await;
@@ -114,8 +122,10 @@ pub async fn resolve(fetcher: &Fetcher, movies: &[RatedMovie]) -> Result<Resolve
         let found = found.with_context(|| format!("looking up \"{}\" on TMDB", wanted.label()))?;
         let Some((id, search_match)) = found else {
             resolved.unmatched.push(wanted.label());
+            resolved.ids.push(None);
             continue;
         };
+        resolved.ids.push(Some(id));
         if !seen.insert(id) {
             continue;
         }

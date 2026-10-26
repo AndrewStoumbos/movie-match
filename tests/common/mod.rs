@@ -73,6 +73,7 @@ pub fn movie(title: &str, spec: Spec) -> MovieDetails {
                 })
                 .collect(),
         },
+        ..MovieDetails::default()
     }
 }
 

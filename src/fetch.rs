@@ -35,15 +35,16 @@ impl Fetcher {
 
     /// Details for each id, in the same order. Cached details skip the network.
     pub async fn details(&self, ids: &[u64]) -> Result<Vec<MovieDetails>> {
-        stream::iter(ids)
-            .map(|&id| self.one_details(id))
+        // Owned ids keep the futures `Send` (see `recommend::resolve`).
+        stream::iter(ids.to_vec())
+            .map(|id| self.one_details(id))
             .buffered(CONCURRENT_REQUESTS)
             .try_collect()
             .await
     }
 
     async fn one_details(&self, id: u64) -> Result<MovieDetails> {
-        let key = format!("details/{id}");
+        let key = details_cache_key(id);
         if let Some(movie) = self.cache().and_then(|c| c.get(&key, DETAILS_MAX_AGE)) {
             return Ok(movie);
         }
@@ -57,4 +58,10 @@ impl Fetcher {
         }
         Ok(movie)
     }
+}
+
+/// The cache key for one movie's details.
+pub fn details_cache_key(id: u64) -> String {
+    // v2: details now keep the overview and poster; older entries lack them.
+    format!("details-v2/{id}")
 }

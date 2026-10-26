@@ -3,7 +3,8 @@
 
 language: rust
 version: "stable"
-setup: ""                   # no system deps; cargo fetches crates during the gates
+# System libraries the desktop app (eframe) needs to build on Linux.
+setup: "sudo apt-get update && sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev"
 
 # Run before the reviewer on every round. Same checks as ci.yml, but clippy treats
 # warnings as errors so the agents can't leave lint debt behind.
@@ -11,7 +12,7 @@ gates:
   - name: format
     run: cargo fmt --all -- --check
   - name: clippy
-    run: cargo clippy --all-targets -- -D warnings
+    run: cargo clippy --workspace --all-targets -- -D warnings
   - name: tests
     run: cargo test --all
 

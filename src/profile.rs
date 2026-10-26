@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::features::{self, FieldWeights};
 use crate::tfidf::{Idf, Vector};
@@ -26,7 +26,7 @@ struct RatingsFile {
 ///
 /// Identified by `tmdb_id` when known; otherwise by `title` (and `year`) through
 /// a TMDB search.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 pub struct RatedMovie {
     pub tmdb_id: Option<u64>,
     pub title: Option<String>,
