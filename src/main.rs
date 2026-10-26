@@ -146,8 +146,12 @@ async fn explain(
         movie.title, movie.release_date, explanation.score, explanation.predicted_rating
     );
     println!(
-        "Nearest rated movies (weight = similarity relative to the closest; your average {:.2} counts as weight {:.2}):",
-        explanation.mean_rating, explanation.prior_weight
+        "Nearest rated movies (weight = similarity relative to the closest x confidence {:.2}; your average {:.2} counts as weight {:.2}):",
+        explanation.confidence, explanation.mean_rating, explanation.prior_weight
+    );
+    println!(
+        "Your bottom 40% of ratings (below {}/10) count 30% less.",
+        rating_text(explanation.low_rating_cutoff)
     );
     if explanation.neighbours.is_empty() {
         println!("  none share any features, so the score is your average");
