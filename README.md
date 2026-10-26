@@ -70,7 +70,7 @@ two different movies rarely share many keywords and people.
 │   ├── features.rs             # feature extraction and TF-IDF
 │   ├── tmdb_errors.rs          # TMDB errors never reveal the API key
 │   ├── tmdb_proxy.rs           # test clients bypass proxy env vars
-│   ├── common/                 # test movie builders
+│   ├── common/                 # test movie builders, local TMDB stand-in server
 │   └── fixtures/               # sample TMDB JSON responses
 ├── data/
 │   └── liked_movies.example.toml

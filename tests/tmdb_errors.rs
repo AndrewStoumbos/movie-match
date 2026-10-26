@@ -4,43 +4,11 @@
 //! makes a request fail in a different way against a local stand-in server and checks
 //! every rendering of the resulting error.
 
-use std::io::{Read, Write};
+mod common;
+
 use std::net::TcpListener;
-use std::thread;
 
-use movie_match::tmdb::TmdbClient;
-
-const SECRET_KEY: &str = "not-a-real-key-5ec7e7";
-
-/// Serves exactly one HTTP request on a loopback port with `response`, and returns
-/// the base URL to send it to.
-fn serve_once(response: &'static str) -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback listener");
-    let addr = listener.local_addr().expect("listener address");
-    thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("accept connection");
-        let mut request = Vec::new();
-        let mut buf = [0; 1024];
-        while !request.windows(4).any(|w| w == b"\r\n\r\n") {
-            match stream.read(&mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => request.extend_from_slice(&buf[..n]),
-            }
-        }
-        let _ = stream.write_all(response.as_bytes());
-    });
-    format!("http://{addr}")
-}
-
-/// A client for the stand-in server at `base`. It ignores proxy environment variables,
-/// so loopback requests are never sent through a proxy to another host.
-fn local_client(base: String) -> TmdbClient {
-    let http = reqwest::Client::builder()
-        .no_proxy()
-        .build()
-        .expect("build HTTP client");
-    TmdbClient::with_base_url(http, SECRET_KEY.to_string(), base)
-}
+use common::tmdb::{local_client, serve_once, API_KEY as SECRET_KEY};
 
 fn assert_key_not_leaked(err: &anyhow::Error) {
     for rendered in [

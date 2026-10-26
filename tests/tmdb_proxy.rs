@@ -1,17 +1,18 @@
-//! Test clients must reach the local stand-in server even when the environment
-//! configures a proxy.
+//! The shared test client must reach the local stand-in server even when the
+//! environment configures a proxy.
 //!
+//! This guards `common::tmdb::local_client`, which the other TMDB client tests rely on.
 //! This file holds a single test because it changes process-wide environment
 //! variables; cargo runs each integration test file as its own process.
 
-use std::io::{Read, Write};
-use std::net::TcpListener;
-use std::thread;
+mod common;
 
-use movie_match::tmdb::TmdbClient;
+use std::net::TcpListener;
+
+use common::tmdb::{local_client, serve_once};
 
 #[tokio::test]
-async fn no_proxy_client_ignores_proxy_env_vars() {
+async fn local_client_ignores_proxy_env_vars() {
     // A proxy on a loopback port nothing listens on: any request routed through it
     // fails to connect instead of reaching the stand-in server.
     let dead_proxy = TcpListener::bind("127.0.0.1:0")
@@ -24,31 +25,12 @@ async fn no_proxy_client_ignores_proxy_env_vars() {
         std::env::remove_var(var);
     }
 
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback listener");
-    let addr = listener.local_addr().expect("listener address");
-    thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("accept connection");
-        let mut request = Vec::new();
-        let mut buf = [0; 1024];
-        while !request.windows(4).any(|w| w == b"\r\n\r\n") {
-            match stream.read(&mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => request.extend_from_slice(&buf[..n]),
-            }
-        }
-        let body = r#"{"page":1,"results":[],"total_pages":1,"total_results":0}"#;
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-            body.len()
-        );
-        let _ = stream.write_all(response.as_bytes());
-    });
-
-    let http = reqwest::Client::builder()
-        .no_proxy()
-        .build()
-        .expect("build HTTP client");
-    let client = TmdbClient::with_base_url(http, "test-key".to_string(), format!("http://{addr}"));
+    let body = r#"{"page":1,"results":[],"total_pages":1,"total_results":0}"#;
+    let base = serve_once(format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    ));
+    let client = local_client(base);
 
     let page = client
         .upcoming(1)
