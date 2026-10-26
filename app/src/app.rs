@@ -367,19 +367,21 @@ impl MovieMatchApp {
         self.checking = Some((row, id, job));
     }
 
-    /// Saves (or with `None`, clears) one rating's TMDB id, then ranks again.
+    /// Saves (or with `None`, clears) one rating's TMDB id, then ranks again. The
+    /// ratings shown change only once the file is written, so the two never disagree.
     fn save_tmdb_id(&mut self, ctx: &egui::Context, row: usize, id: Option<u64>) {
-        let Some(ratings) = &mut self.ratings else {
+        let Some(updated) = self
+            .ratings
+            .as_ref()
+            .and_then(|ratings| with_tmdb_id(ratings, row, id))
+        else {
             return;
         };
-        let Some(movie) = ratings.movies.get_mut(row) else {
-            return;
-        };
-        movie.tmdb_id = id;
-        if let Err(err) = self.store.save_ratings(ratings) {
+        if let Err(err) = self.store.save_ratings(&updated) {
             self.notice = Some(Notice::Error(format!("{err:#}")));
             return;
         }
+        self.ratings = Some(updated);
         self.editing = None;
         // A running ranking used the old ids; drop it even if no new one can start.
         self.ranking_job = None;
@@ -1217,9 +1219,19 @@ fn apply_resolved_ids(movies: &mut [RatedMovie], ids: &[Option<u64>]) -> bool {
     changed
 }
 
+/// A copy of `ratings` with the TMDB id of the rating at `row` set to `id`, or `None`
+/// if there is no such row. The original is left as it was, so a failed save of the
+/// copy changes nothing.
+fn with_tmdb_id(ratings: &SavedRatings, row: usize, id: Option<u64>) -> Option<SavedRatings> {
+    let mut updated = ratings.clone();
+    updated.movies.get_mut(row)?.tmdb_id = id;
+    Some(updated)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{apply_resolved_ids, parse_tmdb_id, shorten};
+    use super::{apply_resolved_ids, parse_tmdb_id, shorten, with_tmdb_id};
+    use crate::store::SavedRatings;
     use movie_match::profile::RatedMovie;
 
     fn rated(title: &str, tmdb_id: Option<u64>) -> RatedMovie {
@@ -1252,6 +1264,33 @@ mod tests {
             &[Some(603), Some(1), Some(2)]
         ));
         assert!(movies.iter().all(|m| m.tmdb_id.is_none()));
+    }
+
+    #[test]
+    fn a_new_tmdb_id_goes_on_a_copy() {
+        let ratings = SavedRatings {
+            source: "ratings.csv".into(),
+            movies: vec![rated("Alien", None), rated("Heat", Some(949))],
+        };
+        let updated = with_tmdb_id(&ratings, 0, Some(348)).expect("row 0 exists");
+        assert_eq!(updated.movies[0].tmdb_id, Some(348));
+        assert_eq!(updated.movies[1].tmdb_id, Some(949));
+        assert_eq!(updated.source, "ratings.csv");
+        // The ratings in memory stay as they were until the copy is saved.
+        assert_eq!(ratings.movies[0].tmdb_id, None);
+
+        let cleared = with_tmdb_id(&ratings, 1, None).expect("row 1 exists");
+        assert_eq!(cleared.movies[1].tmdb_id, None);
+        assert_eq!(ratings.movies[1].tmdb_id, Some(949));
+    }
+
+    #[test]
+    fn no_copy_for_a_missing_row() {
+        let ratings = SavedRatings {
+            source: String::new(),
+            movies: vec![rated("Alien", None)],
+        };
+        assert!(with_tmdb_id(&ratings, 1, Some(348)).is_none());
     }
 
     #[test]
