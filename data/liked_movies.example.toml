@@ -4,9 +4,8 @@
 #   - `tmdb_id` is exact (it's the number in the movie's themoviedb.org URL).
 #   - `title` is looked up by search; add `year` to pick the right one.
 # `rating` goes from 0.5 to 10. Leave it out for favourites (counts as 10).
-#   7 and up: liked, pulls similar movies up.
-#   4 and down: disliked, pushes similar movies down.
-#   In between: neutral, only marks the movie as seen.
+# Every rating counts: each upcoming movie's score is predicted from the ratings
+# of the movies you've rated that are most similar to it.
 
 [[movies]]
 title = "Arrival"

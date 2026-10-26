@@ -84,66 +84,66 @@ pub struct RatedDetails {
     pub rating: f32,
 }
 
-/// One liked or disliked movie, ready to compare against candidates.
+/// One rated movie, ready to compare against candidates.
 #[derive(Debug, Clone)]
 pub struct RatedVector {
     pub title: String,
     pub rating: f32,
-    /// How strongly resemblance to this movie moves a score, 0.0 to 1.0.
-    pub strength: f32,
     pub vector: Vector,
 }
 
-/// Each liked and disliked movie as its own TF-IDF vector, kept separate rather
-/// than averaged so that eclectic tastes (say, horror and romantic comedy) don't
-/// blur together.
+impl RatedVector {
+    pub fn is_liked(&self) -> bool {
+        self.rating >= LIKED_FROM
+    }
+
+    pub fn is_disliked(&self) -> bool {
+        self.rating <= DISLIKED_UP_TO
+    }
+}
+
+/// Every rated movie as its own TF-IDF vector, kept separate rather than averaged
+/// so that eclectic tastes (say, horror and romantic comedy) don't blur together.
 #[derive(Debug, Clone)]
 pub struct TasteProfile {
     idf: Idf,
     weights: FieldWeights,
-    liked: Vec<RatedVector>,
-    disliked: Vec<RatedVector>,
+    rated: Vec<RatedVector>,
+    mean_rating: f32,
     rated_ids: HashSet<u64>,
 }
 
 impl TasteProfile {
-    /// Sorts `rated` into liked and disliked movies. Neutral ratings only mark the
-    /// movie as already seen.
     pub fn new(rated: &[RatedDetails], idf: Idf, weights: FieldWeights) -> Self {
-        let mut liked = Vec::new();
-        let mut disliked = Vec::new();
-        for r in rated {
-            let (list, strength) = if r.rating >= LIKED_FROM {
-                // 7/10 pulls at 0.7, 10/10 at full strength.
-                (&mut liked, r.rating / 10.0)
-            } else if r.rating <= DISLIKED_UP_TO {
-                // 4/10 pushes at 0.25, 1/10 or lower at full strength.
-                (&mut disliked, ((5.0 - r.rating) / 4.0).min(1.0))
-            } else {
-                continue;
-            };
-            list.push(RatedVector {
+        let vectors = rated
+            .iter()
+            .map(|r| RatedVector {
                 title: r.movie.title.clone(),
                 rating: r.rating,
-                strength,
                 vector: Vector::new(&features::extract(&r.movie, &weights), &idf),
-            });
-        }
+            })
+            .collect();
+        let mean_rating = if rated.is_empty() {
+            0.0
+        } else {
+            rated.iter().map(|r| r.rating).sum::<f32>() / rated.len() as f32
+        };
         Self {
             idf,
             weights,
-            liked,
-            disliked,
+            rated: vectors,
+            mean_rating,
             rated_ids: rated.iter().map(|r| r.movie.id).collect(),
         }
     }
 
-    pub fn liked(&self) -> &[RatedVector] {
-        &self.liked
+    pub fn rated(&self) -> &[RatedVector] {
+        &self.rated
     }
 
-    pub fn disliked(&self) -> &[RatedVector] {
-        &self.disliked
+    /// The user's average rating, 0 when nothing is rated.
+    pub fn mean_rating(&self) -> f32 {
+        self.mean_rating
     }
 
     pub fn weights(&self) -> &FieldWeights {

@@ -1,13 +1,21 @@
 //! Scores candidate movies against a taste profile.
+//!
+//! A candidate's score is a predicted rating: the similarity-weighted average of
+//! the user's ratings for the rated movies most similar to it (its "neighbours"),
+//! chosen by similarity alone, whatever the user rated them.
 
 use crate::features;
 use crate::profile::{RatedVector, TasteProfile};
 use crate::tfidf::Vector;
 use crate::tmdb::MovieDetails;
 
-/// How much resembling a disliked movie counts against a candidate, relative to
-/// how much resembling a liked one counts for it.
-pub const DISLIKE_WEIGHT: f32 = 0.5;
+/// How many of the most similar rated movies predict each candidate's rating.
+pub const NEIGHBOURS: usize = 20;
+
+/// How much the user's average rating counts in the prediction, in the same units
+/// as similarity. With weak neighbours the prediction stays near that average
+/// instead of trusting one faint match.
+pub const PRIOR_WEIGHT: f32 = 2.0;
 
 /// How many shared features [`Match::reasons`] lists.
 const MAX_REASONS: usize = 3;
@@ -15,11 +23,12 @@ const MAX_REASONS: usize = 3;
 /// A candidate's score and why it got it.
 #[derive(Debug, Clone)]
 pub struct Match<'a> {
-    /// 0 (unlikely to enjoy) to 100 (identical to a 10/10 favourite).
+    /// Predicted rating × 10: 0 to 100. Candidates sharing nothing with any rated
+    /// movie get the user's average rating × 10.
     pub score: u8,
-    /// The liked movie the candidate most resembles, if it shares anything with one.
+    /// The most similar liked neighbour, if any.
     pub closest_liked: Option<&'a RatedVector>,
-    /// The disliked movie it most resembles, if any. This is what lowered the score.
+    /// The most similar disliked neighbour, if any. This pulled the score down.
     pub closest_disliked: Option<&'a RatedVector>,
     /// Features shared with `closest_liked`, strongest first, e.g. `director Denis Villeneuve`.
     pub reasons: Vec<String>,
@@ -30,27 +39,148 @@ pub fn score(profile: &TasteProfile, movie: &MovieDetails) -> u8 {
     score_detailed(profile, movie).score
 }
 
-/// Field-weighted TF-IDF similarity to the closest liked movie (scaled by its
-/// rating), minus [`DISLIKE_WEIGHT`] × similarity to the closest disliked one.
+/// One rated movie among a candidate's nearest neighbours.
+#[derive(Debug, Clone)]
+pub struct Neighbour<'a> {
+    pub rated: &'a RatedVector,
+    /// Cosine similarity to the candidate, 0.0 to 1.0.
+    pub similarity: f32,
+    /// `similarity` divided by the closest neighbour's similarity, so the closest
+    /// counts 1.0 and the rest count in proportion.
+    pub weight: f32,
+}
+
+/// The rating predicted for one candidate, with the neighbours behind it.
+#[derive(Debug, Clone)]
+pub struct Prediction<'a> {
+    /// Most similar first, at most [`NEIGHBOURS`].
+    pub neighbours: Vec<Neighbour<'a>>,
+    /// How much the user's average rating counted, in neighbour-weight units.
+    pub prior_weight: f32,
+    /// Predicted rating, 0 to 10 (0 when nothing is rated).
+    pub rating: f32,
+}
+
+/// Predicts the user's rating for `movie` from its own [`NEIGHBOURS`] most similar
+/// rated movies, picked by similarity alone:
+///
+/// `(Σ weight × rating + prior × average rating) / (Σ weight + prior)`
+///
+/// Weights are similarities relative to the closest neighbour (see [`Neighbour::weight`]).
+/// Raw similarities between different films are small (often under 0.1), so without
+/// this the average rating would drown out the neighbours. How close that closest
+/// neighbour is still matters through the prior: `PRIOR_WEIGHT × (1 − its similarity)`,
+/// so faint matches lean on the average and near-identical ones barely do.
+pub fn predict<'a>(profile: &'a TasteProfile, candidate: &Vector) -> Prediction<'a> {
+    if profile.rated().is_empty() {
+        return Prediction {
+            neighbours: Vec::new(),
+            prior_weight: 0.0,
+            rating: 0.0,
+        };
+    }
+    let mut found: Vec<(&RatedVector, f32)> = profile
+        .rated()
+        .iter()
+        .map(|r| (r, candidate.cosine(&r.vector)))
+        .filter(|(_, similarity)| *similarity > 0.0)
+        .collect();
+    // Stable sort: ties keep the earlier rated movie.
+    found.sort_by(|a, b| b.1.total_cmp(&a.1));
+    found.truncate(NEIGHBOURS);
+
+    let top = found.first().map_or(0.0, |(_, s)| *s);
+    let neighbours: Vec<Neighbour> = found
+        .into_iter()
+        .map(|(rated, similarity)| Neighbour {
+            rated,
+            similarity,
+            weight: similarity / top,
+        })
+        .collect();
+
+    // With no neighbours, top is 0 and the prediction is exactly the average.
+    let prior_weight = PRIOR_WEIGHT * (1.0 - top);
+    let total: f32 = neighbours.iter().map(|n| n.weight).sum();
+    let weighted: f32 = neighbours.iter().map(|n| n.weight * n.rated.rating).sum();
+    let rating = (weighted + prior_weight * profile.mean_rating()) / (total + prior_weight);
+    Prediction {
+        neighbours,
+        prior_weight,
+        rating,
+    }
+}
+
 pub fn score_detailed<'a>(profile: &'a TasteProfile, movie: &MovieDetails) -> Match<'a> {
     let candidate = profile.vectorize(movie);
-    let liked = closest(profile.liked(), &candidate);
-    let disliked = closest(profile.disliked(), &candidate);
+    let prediction = predict(profile, &candidate);
 
-    let pull = liked.map_or(0.0, |(_, value)| value);
-    let push = disliked.map_or(0.0, |(_, value)| value);
-    let value = (pull - DISLIKE_WEIGHT * push).clamp(0.0, 1.0);
-
-    let reasons = match liked {
-        Some((liked, _)) => reasons(profile, movie, &candidate, &liked.vector),
+    let mut rated = prediction.neighbours.iter().map(|n| n.rated);
+    let closest_liked = rated.clone().find(|r| r.is_liked());
+    let closest_disliked = rated.find(|r| r.is_disliked());
+    let reasons = match closest_liked {
+        Some(liked) => reasons(profile, movie, &candidate, &liked.vector),
         None => Vec::new(),
     };
     Match {
-        score: (value * 100.0).round() as u8,
-        closest_liked: liked.map(|(r, _)| r),
-        closest_disliked: disliked.map(|(r, _)| r),
+        score: to_score(prediction.rating),
+        closest_liked,
+        closest_disliked,
         reasons,
     }
+}
+
+/// A candidate's prediction spelled out neighbour by neighbour, for `--explain`.
+#[derive(Debug, Clone)]
+pub struct Explanation {
+    pub score: u8,
+    pub predicted_rating: f32,
+    pub mean_rating: f32,
+    /// How much `mean_rating` counted, in neighbour-weight units.
+    pub prior_weight: f32,
+    pub neighbours: Vec<ExplainedNeighbour>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExplainedNeighbour {
+    pub title: String,
+    pub rating: f32,
+    pub similarity: f32,
+    pub weight: f32,
+    /// Features shared with the candidate, strongest first.
+    pub shared: Vec<String>,
+}
+
+pub fn explain(profile: &TasteProfile, movie: &MovieDetails) -> Explanation {
+    let candidate = profile.vectorize(movie);
+    let prediction = predict(profile, &candidate);
+    let labels = features::labels(movie, profile.weights());
+    let neighbours = prediction
+        .neighbours
+        .iter()
+        .map(|n| ExplainedNeighbour {
+            title: n.rated.title.clone(),
+            rating: n.rated.rating,
+            similarity: n.similarity,
+            weight: n.weight,
+            shared: candidate
+                .shared(&n.rated.vector)
+                .into_iter()
+                .filter_map(|(token, _)| labels.get(token).cloned())
+                .collect(),
+        })
+        .collect();
+    Explanation {
+        score: to_score(prediction.rating),
+        predicted_rating: prediction.rating,
+        mean_rating: profile.mean_rating(),
+        prior_weight: prediction.prior_weight,
+        neighbours,
+    }
+}
+
+fn to_score(rating: f32) -> u8 {
+    (rating * 10.0).round().clamp(0.0, 100.0) as u8
 }
 
 /// A scored candidate that doesn't borrow from the profile.
@@ -89,19 +219,6 @@ pub fn rank(profile: &TasteProfile, candidates: &[MovieDetails]) -> Vec<Ranked> 
             .then_with(|| a.movie.title.cmp(&b.movie.title))
     });
     ranked
-}
-
-/// The movie in `rated` with the highest similarity × strength, if any is above zero.
-/// Ties keep the earlier movie.
-fn closest<'a>(rated: &'a [RatedVector], candidate: &Vector) -> Option<(&'a RatedVector, f32)> {
-    let mut best: Option<(&RatedVector, f32)> = None;
-    for r in rated {
-        let value = candidate.cosine(&r.vector) * r.strength;
-        if value > best.map_or(0.0, |(_, v)| v) {
-            best = Some((r, value));
-        }
-    }
-    best
 }
 
 fn reasons(

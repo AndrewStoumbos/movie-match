@@ -8,11 +8,14 @@ movies the user likes. See README.md for the roadmap.
 - `src/lib.rs`    library root
 - `src/config.rs` settings from env / `.env` (`TMDB_API_KEY`)
 - `src/profile.rs` `RatedMovie` ratings file (title or `tmdb_id`, rating 0.5-10) and
-  `TasteProfile` (liked >= 7, disliked <= 4, neutral only marks as seen)
+  `TasteProfile` (every rated movie as a vector, plus the mean rating; liked >= 7 and
+  disliked <= 4 only label explanations)
 - `src/features.rs` `MovieDetails` -> field-weighted tokens (`FieldWeights`) and labels
 - `src/tfidf.rs`  `Idf` table, unit-length `Vector`, cosine similarity
-- `src/scoring.rs` `score(profile, movie) -> u8` (0-100), `score_detailed` (with reasons),
-  `rank`. Pure.
+- `src/scoring.rs` `score(profile, movie) -> u8` (0-100): predicted rating × 10 from the
+  movie's 20 most similar rated movies (`predict`: weights relative to the closest,
+  mean rating as prior scaled by 1 - closest similarity). `score_detailed` (with
+  reasons), `explain` (for `--explain`), `rank`. Pure.
 - `src/cache.rs`  `DiskCache`: JSON files with expiry under `data/cache/` (gitignored)
 - `src/fetch.rs`  `Fetcher`: TMDB client + cached movie details
 - `src/catalog.rs` `Catalog`: shared upcoming/popular movies and IDF, same for every user
