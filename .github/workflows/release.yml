@@ -2,6 +2,9 @@ name: Release
 
 # Builds the desktop app for Windows and attaches movie-match.exe to a GitHub release
 # whenever a version tag like v0.1.0 is pushed.
+#
+# Actions are pinned to full commit SHAs (tags can be moved to different code); the
+# comment after each one is the version it was pinned at.
 on:
   push:
     tags: ["v*"]
@@ -13,11 +16,14 @@ jobs:
   windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # Pinned by SHA, so the toolchain has to be named explicitly.
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo build --release -p movie-match-app
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           files: target/release/movie-match.exe
           generate_release_notes: true
