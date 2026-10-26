@@ -66,4 +66,15 @@ impl Vector {
             .sum();
         dot.clamp(0.0, 1.0)
     }
+
+    /// Tokens in both vectors with their share of the cosine, largest first.
+    pub fn shared(&self, other: &Vector) -> Vec<(&str, f32)> {
+        let mut shared: Vec<_> = self
+            .0
+            .iter()
+            .filter_map(|(token, a)| other.0.get(token).map(|b| (token.as_str(), a * b)))
+            .collect();
+        shared.sort_by(|x, y| y.1.total_cmp(&x.1).then_with(|| x.0.cmp(y.0)));
+        shared
+    }
 }

@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// One page of results from a paginated TMDB endpoint.
 #[derive(Debug, Deserialize)]
@@ -24,7 +24,7 @@ pub struct Movie {
 }
 
 /// Full details for one movie, from `/movie/{id}?append_to_response=keywords,credits`.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct MovieDetails {
     pub id: u64,
     pub title: String,
@@ -45,25 +45,25 @@ impl MovieDetails {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Genre {
     pub id: u32,
     pub name: String,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Keywords {
     #[serde(default)]
     pub keywords: Vec<Keyword>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Keyword {
     pub id: u64,
     pub name: String,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Credits {
     #[serde(default)]
     pub cast: Vec<CastMember>,
@@ -71,7 +71,7 @@ pub struct Credits {
     pub crew: Vec<CrewMember>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct CastMember {
     pub id: u64,
     pub name: String,
@@ -80,7 +80,7 @@ pub struct CastMember {
     pub order: u32,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct CrewMember {
     pub id: u64,
     pub name: String,
