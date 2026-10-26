@@ -283,14 +283,7 @@ impl MovieMatchApp {
     /// dropped, so that rating is looked up by title next time.
     fn finish_ranking(&mut self, ranking: Ranking) {
         if let Some(ratings) = &mut self.ratings {
-            let mut changed = false;
-            for (movie, id) in ratings.movies.iter_mut().zip(&ranking.resolved.ids) {
-                if movie.tmdb_id != *id {
-                    movie.tmdb_id = *id;
-                    changed = true;
-                }
-            }
-            if changed {
+            if apply_resolved_ids(&mut ratings.movies, &ranking.resolved.ids) {
                 if let Err(err) = self.store.save_ratings(ratings) {
                     self.notice = Some(Notice::Error(format!("{err:#}")));
                 }
@@ -350,6 +343,11 @@ impl MovieMatchApp {
             saved.source
         )));
         self.ratings = Some(saved);
+        // Jobs started from the old list refer to its rows by position, so their
+        // results would land on the wrong movies. Drop them even if no new ranking
+        // can start (e.g. no API key).
+        self.ranking_job = None;
+        self.checking = None;
         self.ranking = None;
         self.explained = None;
         self.editing = None;
@@ -383,6 +381,8 @@ impl MovieMatchApp {
             return;
         }
         self.editing = None;
+        // A running ranking used the old ids; drop it even if no new one can start.
+        self.ranking_job = None;
         self.start_ranking(ctx, false);
     }
 
@@ -1200,9 +1200,59 @@ fn shorten(text: &str, max_chars: usize) -> String {
     format!("{cut}…")
 }
 
+/// Writes the TMDB ids a ranking resolved onto the ratings it was ranked from (one
+/// id per rating, in order). Returns whether anything changed. Ids for a list of a
+/// different length can't belong to these ratings, so they're ignored.
+fn apply_resolved_ids(movies: &mut [RatedMovie], ids: &[Option<u64>]) -> bool {
+    if movies.len() != ids.len() {
+        return false;
+    }
+    let mut changed = false;
+    for (movie, id) in movies.iter_mut().zip(ids) {
+        if movie.tmdb_id != *id {
+            movie.tmdb_id = *id;
+            changed = true;
+        }
+    }
+    changed
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{parse_tmdb_id, shorten};
+    use super::{apply_resolved_ids, parse_tmdb_id, shorten};
+    use movie_match::profile::RatedMovie;
+
+    fn rated(title: &str, tmdb_id: Option<u64>) -> RatedMovie {
+        RatedMovie {
+            title: Some(title.into()),
+            tmdb_id,
+            ..RatedMovie::default()
+        }
+    }
+
+    #[test]
+    fn resolved_ids_are_saved_in_order() {
+        let mut movies = vec![rated("Alien", None), rated("Heat", Some(949))];
+        assert!(apply_resolved_ids(&mut movies, &[Some(348), Some(949)]));
+        assert_eq!(movies[0].tmdb_id, Some(348));
+        assert_eq!(movies[1].tmdb_id, Some(949));
+        // Nothing new: nothing to save.
+        assert!(!apply_resolved_ids(&mut movies, &[Some(348), Some(949)]));
+        // An id TMDB no longer has comes back as `None` and is cleared.
+        assert!(apply_resolved_ids(&mut movies, &[None, Some(949)]));
+        assert_eq!(movies[0].tmdb_id, None);
+    }
+
+    #[test]
+    fn ids_for_a_different_list_are_ignored() {
+        let mut movies = vec![rated("Alien", None), rated("Heat", None)];
+        assert!(!apply_resolved_ids(&mut movies, &[Some(603)]));
+        assert!(!apply_resolved_ids(
+            &mut movies,
+            &[Some(603), Some(1), Some(2)]
+        ));
+        assert!(movies.iter().all(|m| m.tmdb_id.is_none()));
+    }
 
     #[test]
     fn tmdb_ids_come_from_links_or_numbers() {
