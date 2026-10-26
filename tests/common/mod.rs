@@ -1,4 +1,10 @@
-//! Builders for test movies, so tests never need the network.
+//! Shared test helpers, so tests never need the network: builders for test movies
+//! here, and a local TMDB stand-in server and client in [`tmdb`].
+//!
+//! Every test file compiles its own copy of this module and uses only part of it.
+#![allow(dead_code)]
+
+pub mod tmdb;
 
 use movie_match::tmdb::models::{CastMember, Credits, CrewMember, Genre, Keyword, Keywords};
 use movie_match::tmdb::MovieDetails;
