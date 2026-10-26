@@ -42,6 +42,33 @@ impl Fetcher {
             .await
     }
 
+    /// Details for each id that loads, in the same order. A movie whose details
+    /// fail to load (say TMDB has since removed it) is skipped with a warning on
+    /// stderr, so one bad id in a cached list doesn't fail every run. Fails only if
+    /// none of the ids load, which points at a wider problem like no network.
+    pub async fn available_details(&self, ids: &[u64]) -> Result<Vec<MovieDetails>> {
+        let results: Vec<Result<MovieDetails>> = stream::iter(ids)
+            .map(|&id| self.one_details(id))
+            .buffered(CONCURRENT_REQUESTS)
+            .collect()
+            .await;
+        let mut movies = Vec::with_capacity(results.len());
+        let mut errors = Vec::new();
+        for result in results {
+            match result {
+                Ok(movie) => movies.push(movie),
+                Err(err) => errors.push(err),
+            }
+        }
+        if movies.is_empty() && !errors.is_empty() {
+            return Err(errors.swap_remove(0));
+        }
+        for err in errors {
+            eprintln!("warning: skipping movie: {err:#}");
+        }
+        Ok(movies)
+    }
+
     async fn one_details(&self, id: u64) -> Result<MovieDetails> {
         let key = format!("details/{id}");
         if let Some(movie) = self.cache().and_then(|c| c.get(&key, DETAILS_MAX_AGE)) {
