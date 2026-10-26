@@ -2,6 +2,7 @@
 
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -66,9 +67,33 @@ impl DiskCache {
         };
         let json = serde_json::to_string(&entry).context("could not encode cache entry")?;
         // Write to a temporary file and rename it, so readers never see half a file.
-        let tmp = path.with_extension("json.tmp");
-        fs::write(&tmp, json).with_context(|| format!("could not write {}", tmp.display()))?;
-        fs::rename(&tmp, &path).with_context(|| format!("could not write {}", path.display()))
+        // The name is unique to this write, so writers sharing the cache (other
+        // threads or processes) never move each other's temporary files.
+        static WRITES: AtomicU64 = AtomicU64::new(0);
+        let tmp = path.with_extension(format!(
+            "json.{}-{}.tmp",
+            std::process::id(),
+            WRITES.fetch_add(1, Ordering::Relaxed)
+        ));
+        let written = fs::write(&tmp, json)
+            .with_context(|| format!("could not write {}", tmp.display()))
+            .and_then(|()| {
+                fs::rename(&tmp, &path)
+                    .with_context(|| format!("could not write {}", path.display()))
+            });
+        if written.is_err() {
+            let _ = fs::remove_file(&tmp);
+        }
+        written
+    }
+
+    /// Like [`put`](Self::put), but a failed write only prints a warning to stderr.
+    /// The cache just saves work, so a full or read-only cache shouldn't stop a run
+    /// that already has the value.
+    pub fn put_or_warn<T: Serialize>(&self, key: &str, value: &T) {
+        if let Err(err) = self.put(key, value) {
+            eprintln!("warning: could not cache {key}: {err:#}");
+        }
     }
 
     fn path(&self, key: &str) -> PathBuf {

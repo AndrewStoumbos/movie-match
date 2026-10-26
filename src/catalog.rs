@@ -62,7 +62,7 @@ impl Catalog {
             None => {
                 let ids = list_catalog(fetcher, options).await?;
                 if let Some(cache) = fetcher.cache() {
-                    cache.put(&key, &ids)?;
+                    cache.put_or_warn(&key, &ids);
                 }
                 ids
             }
