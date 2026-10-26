@@ -66,10 +66,15 @@ enum Notice {
 /// Something a screen asked for, carried out after drawing so screens can stay
 /// simple borrows of the app state.
 enum Action {
-    Rank { refresh: bool },
+    Rank {
+        refresh: bool,
+    },
     Explain(String),
     Import,
-    SetTmdbId(usize, u64),
+    /// Check a pasted TMDB id against TMDB, then save it for that rating row.
+    CheckTmdbId(usize, u64),
+    /// Forget a rating row's TMDB match, so it's looked up by title again.
+    ClearTmdbId(usize),
     OpenTab(Tab),
 }
 
@@ -96,6 +101,9 @@ pub struct MovieMatchApp {
     key_input: String,
     /// Rating row whose TMDB match is being fixed, with the id typed so far.
     editing: Option<(usize, String)>,
+    /// A pasted id being checked against TMDB before it's saved: row, id, and the
+    /// lookup (`None` if TMDB has no movie with that id).
+    checking: Option<(usize, u64, Job<Option<MovieDetails>>)>,
 }
 
 impl MovieMatchApp {
@@ -135,6 +143,7 @@ impl MovieMatchApp {
             explain_job: None,
             key_input: String::new(),
             editing: None,
+            checking: None,
         };
         if let Some(path) = import {
             // Imports, then ranks (or asks for an API key first).
@@ -222,7 +231,7 @@ impl MovieMatchApp {
         }));
     }
 
-    fn poll_jobs(&mut self) {
+    fn poll_jobs(&mut self, ctx: &egui::Context) {
         if let Some(result) = self.ranking_job.as_ref().and_then(Job::poll) {
             self.ranking_job = None;
             match result {
@@ -243,15 +252,40 @@ impl MovieMatchApp {
                 Err(err) => self.notice = Some(Notice::Error(err)),
             }
         }
+        let checked = self
+            .checking
+            .as_ref()
+            .and_then(|(row, id, job)| Some((*row, *id, job.poll()?)));
+        if let Some((row, id, result)) = checked {
+            self.checking = None;
+            match result {
+                Ok(Some(movie)) => {
+                    self.notice = Some(Notice::Info(format!(
+                        "Matched to {} ({}).",
+                        movie.title,
+                        year(&movie.release_date)
+                    )));
+                    self.save_tmdb_id(ctx, row, Some(id));
+                }
+                Ok(None) => {
+                    self.notice = Some(Notice::Error(format!(
+                        "TMDB has no movie with id {id}. Paste the link from the movie's \
+                         themoviedb.org page (it contains /movie/)."
+                    )));
+                }
+                Err(err) => self.notice = Some(Notice::Error(err)),
+            }
+        }
     }
 
-    /// Keeps the ranking and saves newly found TMDB ids, so the next run skips
-    /// the title searches.
+    /// Keeps the ranking and saves the TMDB ids it found, so the next run skips the
+    /// title searches. A saved id TMDB no longer has comes back as `None` and is
+    /// dropped, so that rating is looked up by title next time.
     fn finish_ranking(&mut self, ranking: Ranking) {
         if let Some(ratings) = &mut self.ratings {
             let mut changed = false;
             for (movie, id) in ratings.movies.iter_mut().zip(&ranking.resolved.ids) {
-                if movie.tmdb_id.is_none() && id.is_some() {
+                if movie.tmdb_id != *id {
                     movie.tmdb_id = *id;
                     changed = true;
                 }
@@ -323,14 +357,27 @@ impl MovieMatchApp {
         self.start_ranking(ctx, false);
     }
 
-    fn set_tmdb_id(&mut self, ctx: &egui::Context, row: usize, id: u64) {
+    /// Looks a pasted id up on TMDB first, so a wrong or deleted id is never saved.
+    fn check_tmdb_id(&mut self, ctx: &egui::Context, row: usize, id: u64) {
+        let Some(fetcher) = self.fetcher(false) else {
+            return;
+        };
+        let job = Job::spawn(&self.runtime, ctx, async move {
+            let mut found = fetcher.details_if_found(&[id]).await?;
+            Ok(found.pop().flatten())
+        });
+        self.checking = Some((row, id, job));
+    }
+
+    /// Saves (or with `None`, clears) one rating's TMDB id, then ranks again.
+    fn save_tmdb_id(&mut self, ctx: &egui::Context, row: usize, id: Option<u64>) {
         let Some(ratings) = &mut self.ratings else {
             return;
         };
         let Some(movie) = ratings.movies.get_mut(row) else {
             return;
         };
-        movie.tmdb_id = Some(id);
+        movie.tmdb_id = id;
         if let Err(err) = self.store.save_ratings(ratings) {
             self.notice = Some(Notice::Error(format!("{err:#}")));
             return;
@@ -353,7 +400,8 @@ impl MovieMatchApp {
                     self.import_file(ctx, &path);
                 }
             }
-            Action::SetTmdbId(row, id) => self.set_tmdb_id(ctx, row, id),
+            Action::CheckTmdbId(row, id) => self.check_tmdb_id(ctx, row, id),
+            Action::ClearTmdbId(row) => self.save_tmdb_id(ctx, row, None),
             Action::OpenTab(tab) => self.tab = tab,
         }
     }
@@ -369,6 +417,8 @@ impl MovieMatchApp {
             Some("Ranking upcoming movies…")
         } else if self.explain_job.is_some() {
             Some("Working out a score…")
+        } else if self.checking.is_some() {
+            Some("Checking that TMDB id…")
         } else {
             None
         }
@@ -644,7 +694,8 @@ impl MovieMatchApp {
         });
         ui.label(
             RichText::new(
-                "Wrong or missing match? Click Fix and paste the movie's TMDB link or id.",
+                "Wrong or missing match? Click Fix and paste the link from the movie's \
+                 themoviedb.org page, or Clear to look it up by title again.",
             )
             .weak(),
         );
@@ -658,6 +709,7 @@ impl MovieMatchApp {
             .map(|r| (r.movie.id, &r.movie))
             .collect();
         let ranked_once = self.ranking.is_some();
+        let checking = self.checking.is_some();
         let editing = &mut self.editing;
 
         egui::ScrollArea::vertical()
@@ -700,31 +752,53 @@ impl MovieMatchApp {
                             }
                             match editing {
                                 Some((editing_row, text)) if *editing_row == row => {
-                                    let mut done = None;
-                                    ui.horizontal(|ui| {
-                                        ui.add(
-                                            egui::TextEdit::singleline(text)
-                                                .hint_text("TMDB link or id")
-                                                .desired_width(200.0),
-                                        );
-                                        let parsed = parse_tmdb_id(text);
-                                        if ui
-                                            .add_enabled(
-                                                parsed.is_some(),
-                                                egui::Button::new("Save"),
-                                            )
-                                            .clicked()
-                                        {
-                                            done = Some(parsed);
-                                        }
-                                        if ui.button("Cancel").clicked() {
-                                            done = Some(None);
+                                    let mut cancel = false;
+                                    ui.vertical(|ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.add(
+                                                egui::TextEdit::singleline(text)
+                                                    .hint_text("themoviedb.org/movie/… link or id")
+                                                    .desired_width(220.0),
+                                            );
+                                            let parsed = parse_tmdb_id(text);
+                                            if ui
+                                                .add_enabled(
+                                                    parsed.is_some() && !checking,
+                                                    egui::Button::new("Save"),
+                                                )
+                                                .on_hover_text("Checks the id on TMDB, then saves it")
+                                                .clicked()
+                                            {
+                                                if let Some(id) = parsed {
+                                                    action = Some(Action::CheckTmdbId(row, id));
+                                                }
+                                            }
+                                            if movie.tmdb_id.is_some()
+                                                && ui
+                                                    .add_enabled(!checking, egui::Button::new("Clear"))
+                                                    .on_hover_text(
+                                                        "Forget this match and look the movie up by title again",
+                                                    )
+                                                    .clicked()
+                                            {
+                                                action = Some(Action::ClearTmdbId(row));
+                                            }
+                                            if ui.button("Cancel").clicked() {
+                                                cancel = true;
+                                            }
+                                        });
+                                        if !text.trim().is_empty() && parse_tmdb_id(text).is_none() {
+                                            ui.label(
+                                                RichText::new(
+                                                    "Paste a themoviedb.org/movie/… link or just the number.",
+                                                )
+                                                .small()
+                                                .color(Color32::from_rgb(230, 120, 100)),
+                                            );
                                         }
                                     });
-                                    match done {
-                                        Some(Some(id)) => action = Some(Action::SetTmdbId(row, id)),
-                                        Some(None) => *editing = None,
-                                        None => {}
+                                    if cancel {
+                                        *editing = None;
                                     }
                                 }
                                 _ => {
@@ -849,7 +923,7 @@ impl MovieMatchApp {
 impl eframe::App for MovieMatchApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        self.poll_jobs();
+        self.poll_jobs(&ctx);
 
         let dropped = ui.input(|i| i.raw.dropped_files.first().map(|f| f.path().to_path_buf()));
         if let Some(path) = dropped {
@@ -1064,11 +1138,16 @@ fn read_ratings_file(path: &Path) -> Result<Vec<RatedMovie>> {
     }
 }
 
-/// A TMDB movie id from a pasted id or link like `themoviedb.org/movie/603-the-matrix`.
+/// A TMDB movie id from a bare number or a movie link like
+/// `themoviedb.org/movie/603-the-matrix`. Anything else, such as a TV link
+/// (`/tv/1399`), is rejected rather than guessed at.
 fn parse_tmdb_id(text: &str) -> Option<u64> {
     let text = text.trim();
-    let tail = text.rsplit_once("/movie/").map_or(text, |(_, tail)| tail);
-    let digits: String = tail.chars().take_while(char::is_ascii_digit).collect();
+    let digits: String = match text.rsplit_once("/movie/") {
+        Some((_, tail)) => tail.chars().take_while(char::is_ascii_digit).collect(),
+        None if text.chars().all(|c| c.is_ascii_digit()) => text.to_string(),
+        None => return None,
+    };
     digits.parse().ok().filter(|id| *id > 0)
 }
 
@@ -1124,6 +1203,15 @@ mod tests {
         assert_eq!(parse_tmdb_id(" 27205 "), Some(27205));
         assert_eq!(parse_tmdb_id("the matrix"), None);
         assert_eq!(parse_tmdb_id("0"), None);
+    }
+
+    #[test]
+    fn non_movie_links_and_stray_text_are_rejected() {
+        // A TV show's id would point at an unrelated movie.
+        assert_eq!(parse_tmdb_id("https://www.themoviedb.org/tv/1399"), None);
+        assert_eq!(parse_tmdb_id("https://www.themoviedb.org/person/287"), None);
+        assert_eq!(parse_tmdb_id("603abc"), None);
+        assert_eq!(parse_tmdb_id(""), None);
     }
 
     #[test]
