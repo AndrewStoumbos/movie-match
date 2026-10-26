@@ -54,20 +54,21 @@ pub async fn rank_upcoming(
     Ok(Ranking { resolved, ranked })
 }
 
-/// Explains one movie's score for this user. `title` is matched against the
-/// upcoming releases first (ignoring case), then looked up with a TMDB search, so
-/// any movie works. `None` when nothing matches.
+/// Explains one movie's score for this user. `title`, trimmed of surrounding
+/// whitespace, is matched against the upcoming releases first (ignoring case), then
+/// looked up with a TMDB search, so any movie works. `None` when nothing matches.
 pub async fn explain_movie(
     fetcher: &Fetcher,
     movies: &[RatedMovie],
     options: &Options,
     title: &str,
 ) -> Result<Option<(MovieDetails, Explanation)>> {
+    let title = title.trim();
     let catalog = Catalog::load(fetcher, options.catalog).await?;
     let movie = match catalog
         .upcoming
         .iter()
-        .find(|m| m.title.eq_ignore_ascii_case(title.trim()))
+        .find(|m| m.title.eq_ignore_ascii_case(title))
     {
         Some(movie) => movie.clone(),
         None => {
