@@ -69,6 +69,7 @@ two different movies rarely share many keywords and people.
 │   ├── scoring.rs              # scoring behaviour
 │   ├── features.rs             # feature extraction and TF-IDF
 │   ├── tmdb_errors.rs          # TMDB errors never reveal the API key
+│   ├── tmdb_proxy.rs           # test clients bypass proxy env vars
 │   ├── common/                 # test movie builders
 │   └── fixtures/               # sample TMDB JSON responses
 ├── data/
