@@ -32,6 +32,16 @@ fn serve_once(response: &'static str) -> String {
     format!("http://{addr}")
 }
 
+/// A client for the stand-in server at `base`. It ignores proxy environment variables,
+/// so loopback requests are never sent through a proxy to another host.
+fn local_client(base: String) -> TmdbClient {
+    let http = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("build HTTP client");
+    TmdbClient::with_base_url(http, SECRET_KEY.to_string(), base)
+}
+
 fn assert_key_not_leaked(err: &anyhow::Error) {
     for rendered in [
         format!("{err}"),
@@ -54,7 +64,7 @@ fn assert_key_not_leaked(err: &anyhow::Error) {
 async fn http_error_status_does_not_leak_key() {
     let base =
         serve_once("HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
-    let client = TmdbClient::with_base_url(SECRET_KEY.to_string(), base);
+    let client = local_client(base);
 
     let err = client.upcoming(1).await.expect_err("401 is an error");
 
@@ -68,7 +78,7 @@ async fn undecodable_body_does_not_leak_key() {
     let base = serve_once(
         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 8\r\nConnection: close\r\n\r\nnot json",
     );
-    let client = TmdbClient::with_base_url(SECRET_KEY.to_string(), base);
+    let client = local_client(base);
 
     let err = client
         .movie_details(42)
@@ -85,7 +95,7 @@ async fn connection_failure_does_not_leak_key() {
     let addr = TcpListener::bind("127.0.0.1:0")
         .and_then(|l| l.local_addr())
         .expect("reserve loopback port");
-    let client = TmdbClient::with_base_url(SECRET_KEY.to_string(), format!("http://{addr}"));
+    let client = local_client(format!("http://{addr}"));
 
     let err = client
         .search_movie("Heat", Some(1995))
