@@ -16,7 +16,8 @@ movies the user likes. See README.md for the roadmap.
 - `src/scoring.rs` `score(profile, movie) -> u8` (0-100): predicted rating × 10 from the
   movie's 20 most similar rated movies (`predict`: weight = (similarity / closest)^2
   (`SIMILARITY_POWER`), x 0.7 for neighbours among the user's bottom 40% of ratings
-  (`TasteProfile::is_low_rating`); the weighted average is blended with the overall
+  (`TasteProfile::is_low_rating`); movies tied for the 20th place are all kept and
+  split the places left, so file order never matters; the weighted average is blended with the overall
   average as (n x weighted + 5 x overall) / (n + 5) for n neighbours
   (`OVERALL_SHRINK`), so exactly the overall average with none). `score_detailed` (with
   reasons), `explain` (for `--explain`), `rank`. Pure.

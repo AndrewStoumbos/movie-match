@@ -61,19 +61,23 @@ pub struct Neighbour<'a> {
     pub similarity: f32,
     /// `(similarity / closest similarity) ^ SIMILARITY_POWER`, times
     /// [`LOW_RATING_IMPACT`] for low ratings. The closest counts 1.0 (0.7 if a low
-    /// rating); one half as similar counts 0.25.
+    /// rating); one half as similar counts 0.25. Movies tied for the last of the
+    /// [`NEIGHBOURS`] places split the places left: 30 tied for 10 places count a
+    /// third each.
     pub weight: f32,
 }
 
 /// The rating predicted for one candidate, with the neighbours behind it.
 #[derive(Debug, Clone)]
 pub struct Prediction<'a> {
-    /// Most similar first, at most [`NEIGHBOURS`].
+    /// Most similar first: [`NEIGHBOURS`] of them, or more when several are tied for
+    /// the last place (all of those are kept, see [`Neighbour::weight`]).
     pub neighbours: Vec<Neighbour<'a>>,
     /// The neighbours' ratings averaged by [`Neighbour::weight`] (0 with no neighbours).
     pub neighbour_rating: f32,
     /// How much of the prediction is the user's overall average, 0.0 to 1.0:
-    /// `OVERALL_SHRINK / (neighbours + OVERALL_SHRINK)`, so 1.0 with no neighbours.
+    /// `OVERALL_SHRINK / (neighbours + OVERALL_SHRINK)`, so 1.0 with no neighbours,
+    /// counting at most [`NEIGHBOURS`] neighbours.
     pub overall_share: f32,
     /// Predicted rating, 0 to 10 (0 when nothing is rated).
     pub rating: f32,
@@ -93,7 +97,8 @@ pub struct Prediction<'a> {
 /// exactly that average. Weights are relative to the closest neighbour because raw
 /// similarities between different films are small (often under 0.1) and only their
 /// ratios matter. Weights of neighbours among the user's low ratings are multiplied
-/// by [`LOW_RATING_IMPACT`].
+/// by [`LOW_RATING_IMPACT`]. Movies tied for the last place are all kept and split
+/// it, so the order of the ratings file never changes a prediction.
 pub fn predict<'a>(profile: &'a TasteProfile, candidate: &Vector) -> Prediction<'a> {
     if profile.rated().is_empty() {
         return Prediction {
@@ -109,9 +114,19 @@ pub fn predict<'a>(profile: &'a TasteProfile, candidate: &Vector) -> Prediction<
         .map(|r| (r, candidate.cosine(&r.vector)))
         .filter(|(_, similarity)| *similarity > 0.0)
         .collect();
-    // Stable sort: ties keep the earlier rated movie.
+    // Stable sort: ties keep the earlier rated movie, which only orders the list.
     found.sort_by(|a, b| b.1.total_cmp(&a.1));
-    found.truncate(NEIGHBOURS);
+    // Movies tied with the last neighbour all stay and share its remaining slots, so
+    // the prediction never depends on the order of the ratings file.
+    let mut tie_share = 1.0;
+    let mut cutoff = f32::NEG_INFINITY;
+    if found.len() > NEIGHBOURS {
+        cutoff = found[NEIGHBOURS - 1].1;
+        let above = found.iter().take_while(|(_, s)| *s > cutoff).count();
+        let kept = found.iter().take_while(|(_, s)| *s >= cutoff).count();
+        tie_share = (NEIGHBOURS - above) as f32 / (kept - above) as f32;
+        found.truncate(kept);
+    }
 
     let top = found.first().map_or(0.0, |(_, s)| *s);
     let neighbours: Vec<Neighbour> = found
@@ -122,10 +137,11 @@ pub fn predict<'a>(profile: &'a TasteProfile, candidate: &Vector) -> Prediction<
             } else {
                 1.0
             };
+            let share = if similarity == cutoff { tie_share } else { 1.0 };
             Neighbour {
                 rated,
                 similarity,
-                weight: (similarity / top).powi(SIMILARITY_POWER) * impact,
+                weight: (similarity / top).powi(SIMILARITY_POWER) * impact * share,
             }
         })
         .collect();
@@ -134,7 +150,8 @@ pub fn predict<'a>(profile: &'a TasteProfile, candidate: &Vector) -> Prediction<
     let weighted: f32 = neighbours.iter().map(|n| n.weight * n.rated.rating).sum();
     let neighbour_rating = if total > 0.0 { weighted / total } else { 0.0 };
     // With no neighbours the share is 1 and the prediction is exactly the overall average.
-    let overall_share = OVERALL_SHRINK / (neighbours.len() as f32 + OVERALL_SHRINK);
+    let n = neighbours.len().min(NEIGHBOURS) as f32;
+    let overall_share = OVERALL_SHRINK / (n + OVERALL_SHRINK);
     let rating = (1.0 - overall_share) * neighbour_rating + overall_share * profile.mean_rating();
     Prediction {
         neighbours,
