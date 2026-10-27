@@ -103,7 +103,8 @@ pub struct MovieLensEvaluation {
 ///
 /// With `quality_cast` set, also estimates each movie's audience score from its
 /// directors', writers' and top `quality_cast` actors' earlier films (fetching their
-/// filmographies) for the "est. quality" methods.
+/// filmographies) for the "est. quality" methods; the trimmed details then keep that
+/// many actors even past `weights.cast_limit`.
 pub async fn evaluate_movielens(
     fetcher: &Fetcher,
     users: &UserRatings,
@@ -120,7 +121,7 @@ pub async fn evaluate_movielens(
     let mut details = BTreeMap::new();
     for (id, found) in ids.iter().zip(fetcher.details_if_found(&ids).await?) {
         if let Some(mut movie) = found {
-            features::trim_to_used(&mut movie, &weights);
+            features::trim_keeping_cast(&mut movie, &weights, quality_cast.unwrap_or(0));
             details.insert(*id, movie);
         }
     }
@@ -213,7 +214,7 @@ pub async fn evaluate_track_record(
         .into_iter()
         .flatten()
         .map(|mut movie| {
-            features::trim_to_used(&mut movie, &weights);
+            features::trim_keeping_cast(&mut movie, &weights, cast_limit);
             movie
         })
         .collect();
