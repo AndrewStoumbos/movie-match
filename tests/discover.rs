@@ -5,7 +5,7 @@ mod common;
 use std::time::Duration;
 
 use common::tmdb::{local_client, serve_once_recording};
-use movie_match::catalog::{catalog_cache_key, CatalogOptions, ReleaseWindows};
+use movie_match::catalog::{catalog_cache_key, CatalogOptions};
 use movie_match::tmdb::{Discover, Region};
 
 #[test]
@@ -35,16 +35,12 @@ fn locales_give_their_country() {
 
 #[test]
 fn the_region_is_part_of_the_catalog_key() {
-    let windows = ReleaseWindows::new(20_752, 12);
     let everywhere = CatalogOptions::default();
     let us = CatalogOptions {
         upcoming_region: Region::parse("US"),
         ..everywhere
     };
-    assert_ne!(
-        catalog_cache_key(&everywhere, &windows),
-        catalog_cache_key(&us, &windows)
-    );
+    assert_ne!(catalog_cache_key(&everywhere), catalog_cache_key(&us));
 }
 
 /// The request line `discover` sends for `query`.

@@ -40,8 +40,8 @@ struct Cli {
     #[arg(long, default_value_t = 1)]
     recent_pages: u32,
 
-    /// How far back "recent" reaches, in months.
-    #[arg(long, default_value_t = 12)]
+    /// How far back "recent" reaches, in months (1 to 120).
+    #[arg(long, default_value_t = 12, value_parser = clap::value_parser!(u32).range(1..=120))]
     recent_months: u32,
 
     /// Recent releases need at least this many TMDB audience votes.

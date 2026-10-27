@@ -67,18 +67,20 @@ pub struct Catalog {
 /// What's cached for the catalog: just the ids. Details live in the details cache.
 #[derive(Debug, Serialize, Deserialize)]
 struct CatalogIds {
+    /// The day the lists were made for (`YYYY-MM-DD`). Lists from another day are
+    /// a cache miss, since where upcoming ends and recent begins moves every day.
+    listed_on: String,
     upcoming: Vec<u64>,
-    #[serde(default)]
     recent: Vec<u64>,
     reference: Vec<u64>,
 }
 
-/// The cache key for the catalog with `options` on the day `windows` describe.
-/// Today's date is part of it, so the lists (and where upcoming ends and recent
-/// begins) move on every day. Use it in tests, never a literal key.
-pub fn catalog_cache_key(options: &CatalogOptions, windows: &ReleaseWindows) -> String {
+/// The cache key for the catalog with `options`. The day isn't part of it (it's
+/// stored with the ids), so each set of options keeps one file that's replaced
+/// when the day changes. Use it in tests, never a literal key.
+pub fn catalog_cache_key(options: &CatalogOptions) -> String {
     format!(
-        "catalog-v3-u{}-{}-c{}-m{}-v{}-r{}-{}",
+        "catalog-v4-u{}-{}-c{}-m{}-v{}-r{}",
         options.upcoming_pages,
         options
             .upcoming_region
@@ -86,8 +88,7 @@ pub fn catalog_cache_key(options: &CatalogOptions, windows: &ReleaseWindows) -> 
         options.recent_pages,
         options.recent_months,
         options.recent_min_votes,
-        options.reference_pages,
-        windows.upcoming_from
+        options.reference_pages
     )
 }
 
@@ -129,14 +130,6 @@ impl ReleaseWindows {
     }
 }
 
-/// `movies` with at least `min` TMDB audience votes.
-pub fn with_min_votes(movies: Vec<MovieDetails>, min: u32) -> Vec<MovieDetails> {
-    movies
-        .into_iter()
-        .filter(|m| m.vote_count.unwrap_or(0) >= min)
-        .collect()
-}
-
 /// `movies` released on or after `from` and, when given, on or before `to`
 /// (`YYYY-MM-DD`). Movies without a release date are left out.
 pub fn released_between(
@@ -166,8 +159,12 @@ impl Catalog {
     /// freshly listed from TMDB.
     pub async fn load(fetcher: &Fetcher, options: CatalogOptions) -> Result<Self> {
         let windows = ReleaseWindows::new(today(), options.recent_months);
-        let key = catalog_cache_key(&options, &windows);
-        let ids = match fetcher.cache().and_then(|c| c.get(&key, CATALOG_MAX_AGE)) {
+        let key = catalog_cache_key(&options);
+        let cached = fetcher
+            .cache()
+            .and_then(|c| c.get::<CatalogIds>(&key, CATALOG_MAX_AGE))
+            .filter(|ids| ids.listed_on == windows.upcoming_from);
+        let ids = match cached {
             Some(ids) => ids,
             None => {
                 let ids = list_catalog(fetcher, options, &windows).await?;
@@ -180,21 +177,19 @@ impl Catalog {
         // The ids may be a day old, so a movie TMDB has removed since is skipped
         // rather than failing every run until the cached list expires. Any other
         // failure fails the load, so a network blip can't skew the catalog. The
-        // release dates (and recent vote counts) are checked again here, since a
-        // film's date can change and cached details can be older than the list.
+        // release dates are checked again here, since a film's date can change.
+        // Vote counts aren't: discover already applied the minimum, counts only
+        // grow, and cached details can be days older than the list.
         Ok(Self {
             upcoming: released_between(
                 fetcher.available_details(&ids.upcoming).await?,
                 &windows.upcoming_from,
                 None,
             ),
-            recent: with_min_votes(
-                released_between(
-                    fetcher.available_details(&ids.recent).await?,
-                    &windows.recent_from,
-                    Some(&windows.recent_to),
-                ),
-                options.recent_min_votes,
+            recent: released_between(
+                fetcher.available_details(&ids.recent).await?,
+                &windows.recent_from,
+                Some(&windows.recent_to),
             ),
             reference: fetcher.available_details(&ids.reference).await?,
         })
@@ -248,6 +243,7 @@ async fn list_catalog(
     }
     let reference = list_ids(options.reference_pages, &mut seen, |p| client.popular(p)).await?;
     Ok(CatalogIds {
+        listed_on: windows.upcoming_from.clone(),
         upcoming,
         recent,
         reference,

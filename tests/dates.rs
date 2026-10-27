@@ -1,4 +1,4 @@
-use movie_match::catalog::{released_between, with_min_votes, ReleaseWindows};
+use movie_match::catalog::{released_between, ReleaseWindows};
 use movie_match::dates::Date;
 use movie_match::tmdb::MovieDetails;
 
@@ -68,22 +68,6 @@ fn recent_slices_end_before_a_clamped_start() {
             slice("2025-11-30", "2026-02-27"),
         ]
     );
-}
-
-#[test]
-fn min_votes_filter_treats_missing_counts_as_zero() {
-    let voted = |id: u64, votes: Option<u32>| MovieDetails {
-        id,
-        vote_count: votes,
-        ..MovieDetails::default()
-    };
-    let movies = vec![voted(1, Some(50)), voted(2, Some(49)), voted(3, None)];
-    let ids: Vec<u64> = with_min_votes(movies.clone(), 50)
-        .into_iter()
-        .map(|m| m.id)
-        .collect();
-    assert_eq!(ids, [1]);
-    assert_eq!(with_min_votes(movies, 0).len(), 3);
 }
 
 #[test]

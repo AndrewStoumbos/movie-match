@@ -5,10 +5,12 @@ mod common;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use common::tmdb::{local_client, serve_once};
+use common::tmdb::{local_client, serve_once, serve_with};
 use common::{movie, Spec};
 use movie_match::cache::DiskCache;
-use movie_match::catalog::{catalog_cache_key, today, Catalog, CatalogOptions, ReleaseWindows};
+use movie_match::catalog::{
+    catalog_cache_key, today, Catalog, CatalogOptions, ReleaseWindows, CATALOG_MAX_AGE,
+};
 use movie_match::fetch::{details_cache_key, Fetcher};
 use movie_match::tmdb::MovieDetails;
 
@@ -33,8 +35,10 @@ fn cache_with_catalog(dir: &Path, upcoming_ids: &[u64], cached: &[MovieDetails])
     let cache = DiskCache::new(dir);
     cache
         .put(
-            &catalog_cache_key(&options, &windows),
-            &serde_json::json!({ "upcoming": upcoming_ids, "recent": [], "reference": [] }),
+            &catalog_cache_key(&options),
+            &serde_json::json!({
+                "listed_on": windows.upcoming_from,
+                "upcoming": upcoming_ids, "recent": [], "reference": [] }),
         )
         .expect("write catalog");
     for m in cached {
@@ -47,6 +51,45 @@ fn cache_with_catalog(dir: &Path, upcoming_ids: &[u64], cached: &[MovieDetails])
             .expect("write details");
     }
     cache
+}
+
+#[tokio::test]
+async fn a_catalog_listed_on_another_day_is_listed_again() {
+    let dir = temp_dir("other-day");
+    let options = CatalogOptions::default();
+    let key = catalog_cache_key(&options);
+    let cache = cache_with_catalog(&dir, &[1], &[]);
+    cache
+        .put(
+            &key,
+            &serde_json::json!({
+                "listed_on": "2000-01-01",
+                "upcoming": [1], "recent": [], "reference": [] }),
+        )
+        .expect("write yesterday's catalog");
+    // Every list TMDB returns now is empty, and movie 1's details aren't cached,
+    // so loading the old list would fail.
+    let empty = r#"{"page":1,"results":[],"total_pages":1,"total_results":0}"#;
+    let base = serve_with(move |_| {
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{empty}",
+            empty.len()
+        )
+    });
+    let fetcher = Fetcher::new(local_client(base), Some(DiskCache::new(&dir)));
+
+    let catalog = Catalog::load(&fetcher, options)
+        .await
+        .expect("catalog is listed again");
+
+    assert!(catalog.upcoming.is_empty());
+    // The one file for these options now holds today's lists.
+    let saved: serde_json::Value = DiskCache::new(&dir)
+        .get(&key, CATALOG_MAX_AGE)
+        .expect("catalog saved");
+    let today = ReleaseWindows::new(today(), options.recent_months).upcoming_from;
+    assert_eq!(saved["listed_on"], today);
+    let _ = fs::remove_dir_all(&dir);
 }
 
 #[tokio::test]
