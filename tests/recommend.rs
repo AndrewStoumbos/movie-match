@@ -36,8 +36,10 @@ fn cache_with_upcoming(dir: &Path, upcoming: &[MovieDetails]) -> DiskCache {
     let ids: Vec<u64> = upcoming.iter().map(|m| m.id).collect();
     cache
         .put(
-            &catalog_cache_key(&options, &windows),
-            &serde_json::json!({ "upcoming": ids, "recent": [], "reference": [] }),
+            &catalog_cache_key(&options),
+            &serde_json::json!({
+                "listed_on": windows.upcoming_from,
+                "upcoming": ids, "recent": [], "reference": [] }),
         )
         .expect("write catalog");
     for m in upcoming {

@@ -33,7 +33,8 @@ movies the user likes. See README.md for the roadmap.
   first released today (local date) or later, optionally only films with a cinema
   release in `upcoming_region`; recent is the last `recent_months`, fetched in
   3-month slices with at least `recent_min_votes` votes; reference is `/movie/popular`.
-  The cache key (`catalog_cache_key`) holds the options and today's date
+  The cache key (`catalog_cache_key`) holds the options; the day is stored with the
+  ids, and a list from another day is a miss, so each option set keeps one file
 - `src/recommend.rs` per-user steps: `resolve` ratings to TMDB (`Resolved::ids` per input,
   in order; a given id TMDB answers 404 for becomes unmatched with id `None`, so one
   stale id can't fail every run), `rank_upcoming`, `explain_movie`. Futures must stay `Send` (the app runs them

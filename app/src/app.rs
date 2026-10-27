@@ -915,7 +915,8 @@ impl MovieMatchApp {
                     if !region.is_empty() && Region::parse(region).is_none() {
                         ui.colored_label(
                             ui.visuals().warn_fg_color,
-                            "Use a two-letter country code such as US or GB. Until then,                              Upcoming shows films from every country.",
+                            "Use a two-letter country code such as US or GB. Until then, \
+                             Upcoming shows films from every country.",
                         );
                     }
                     ui.horizontal(|ui| {
