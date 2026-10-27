@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use common::tmdb::{local_client, serve_once};
 use common::{movie, Spec};
 use movie_match::cache::DiskCache;
-use movie_match::catalog::{Catalog, CatalogOptions};
+use movie_match::catalog::{catalog_cache_key, today, Catalog, CatalogOptions, ReleaseWindows};
 use movie_match::fetch::{details_cache_key, Fetcher};
 use movie_match::tmdb::MovieDetails;
 
@@ -24,23 +24,26 @@ fn temp_dir(name: &str) -> PathBuf {
     dir
 }
 
-/// A cache whose catalog lists `upcoming_ids` and no reference movies, with
-/// details saved only for `cached`.
+/// A cache whose catalog lists `upcoming_ids` and no recent or reference movies,
+/// with details saved only for `cached` (undated ones dated today, so they count
+/// as upcoming).
 fn cache_with_catalog(dir: &Path, upcoming_ids: &[u64], cached: &[MovieDetails]) -> DiskCache {
     let options = CatalogOptions::default();
+    let windows = ReleaseWindows::new(today(), options.recent_months);
     let cache = DiskCache::new(dir);
     cache
         .put(
-            &format!(
-                "catalog-u{}-r{}",
-                options.upcoming_pages, options.reference_pages
-            ),
-            &serde_json::json!({ "upcoming": upcoming_ids, "reference": [] }),
+            &catalog_cache_key(&options, &windows),
+            &serde_json::json!({ "upcoming": upcoming_ids, "recent": [], "reference": [] }),
         )
         .expect("write catalog");
     for m in cached {
+        let mut m = m.clone();
+        if m.release_date.is_empty() {
+            m.release_date = windows.upcoming_from.clone();
+        }
         cache
-            .put(&details_cache_key(m.id), m)
+            .put(&details_cache_key(m.id), &m)
             .expect("write details");
     }
     cache

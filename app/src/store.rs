@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
 use movie_match::profile::RatedMovie;
+use movie_match::tmdb::Region;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -19,8 +20,16 @@ const RATINGS_FILE: &str = "ratings.json";
 pub struct Settings {
     /// TMDB API key. Kept only in the settings file on this computer.
     pub api_key: String,
-    /// Pages of upcoming releases to rate (20 movies per page).
+    /// Pages of upcoming releases (today or later) to rate (20 movies per page).
     pub upcoming_pages: u32,
+    /// Two-letter country code: Upcoming lists only movies with a cinema release
+    /// there. Empty for every country.
+    pub upcoming_region: String,
+    /// Pages of recent releases to rate per 3 months of `recent_months` (20 movies
+    /// per page).
+    pub recent_pages: u32,
+    /// How far back the Recent list reaches, in months.
+    pub recent_months: u32,
     /// Pages of popular movies used to judge how rare each feature is.
     pub reference_pages: u32,
     /// Reuse downloaded TMDB data between runs.
@@ -32,6 +41,12 @@ impl Default for Settings {
         Self {
             api_key: String::new(),
             upcoming_pages: 2,
+            upcoming_region: sys_locale::get_locale()
+                .and_then(|locale| Region::from_locale(&locale))
+                .map(|region| region.to_string())
+                .unwrap_or_default(),
+            recent_pages: 1,
+            recent_months: 12,
             reference_pages: 5,
             use_cache: true,
         }

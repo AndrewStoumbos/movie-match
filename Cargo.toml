@@ -6,6 +6,7 @@ description = "Scores upcoming movie releases by how likely you are to enjoy the
 
 [dependencies]
 anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4", features = ["derive"] }
 csv = "1"
 dotenvy = "0.15"

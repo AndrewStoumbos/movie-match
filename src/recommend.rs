@@ -42,11 +42,14 @@ pub struct Resolved {
 #[derive(Debug, Clone)]
 pub struct Ranking {
     pub resolved: Resolved,
-    /// Upcoming releases the user hasn't rated, best match first.
+    /// Upcoming releases (today or later) the user hasn't rated, best match first.
     pub ranked: Vec<Ranked>,
+    /// Recent releases (see [`CatalogOptions::recent_months`]) the user hasn't
+    /// rated, best match first.
+    pub recent: Vec<Ranked>,
 }
 
-/// Ranks the catalog's upcoming releases for one user.
+/// Ranks the catalog's upcoming and recent releases for one user.
 pub async fn rank_upcoming(
     fetcher: &Fetcher,
     movies: &[RatedMovie],
@@ -60,7 +63,12 @@ pub async fn rank_upcoming(
         options.weights,
     );
     let ranked = scoring::rank(&profile, &catalog.upcoming);
-    Ok(Ranking { resolved, ranked })
+    let recent = scoring::rank(&profile, &catalog.recent);
+    Ok(Ranking {
+        resolved,
+        ranked,
+        recent,
+    })
 }
 
 /// Leave-one-out evaluation of the scoring on the user's own ratings (see
@@ -238,8 +246,9 @@ pub async fn evaluate_track_record(
 }
 
 /// Explains one movie's score for this user. `title`, trimmed of surrounding
-/// whitespace, is matched against the upcoming releases first (ignoring case), then
-/// looked up with a TMDB search, so any movie works. `None` when nothing matches.
+/// whitespace, is matched against the upcoming and recent releases first (ignoring
+/// case), then looked up with a TMDB search, so any movie works. `None` when nothing
+/// matches.
 pub async fn explain_movie(
     fetcher: &Fetcher,
     movies: &[RatedMovie],
@@ -251,6 +260,7 @@ pub async fn explain_movie(
     let movie = match catalog
         .upcoming
         .iter()
+        .chain(&catalog.recent)
         .find(|m| m.title.eq_ignore_ascii_case(title))
     {
         Some(movie) => movie.clone(),

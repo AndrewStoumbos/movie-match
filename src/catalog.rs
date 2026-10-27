@@ -1,6 +1,6 @@
-//! The part of a ranking that's the same for every user: the candidate movies and
-//! the reference set used to judge how rare each feature is. Fetched once and
-//! cached for a day.
+//! The part of a ranking that's the same for every user: the candidate movies
+//! (releasing today or later, and released recently) and the reference set used to
+//! judge how rare each feature is. Fetched once a day and cached.
 
 use std::collections::HashSet;
 use std::future::Future;
@@ -9,18 +9,34 @@ use std::time::Duration;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+use crate::dates::Date;
 use crate::features::{self, FieldWeights};
 use crate::fetch::Fetcher;
 use crate::tfidf::Idf;
-use crate::tmdb::{Movie, MovieDetails, Page};
+use crate::tmdb::{Discover, Movie, MovieDetails, Page, Region};
 
-/// How long the cached lists of upcoming and popular movies are reused.
+/// How long the cached lists of upcoming, recent and popular movies are reused.
 pub const CATALOG_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Recent releases are fetched in slices of this many months, the most popular of
+/// each, so the list covers the whole window rather than just its newest weeks.
+pub const RECENT_SLICE_MONTHS: u32 = 3;
 
 #[derive(Debug, Clone, Copy)]
 pub struct CatalogOptions {
-    /// Pages of `/movie/upcoming` to rate (20 movies per page).
+    /// Pages of movies releasing today or later to rate, most popular first (20 per page).
     pub upcoming_pages: u32,
+    /// Only upcoming movies with a cinema release listed for this country, which
+    /// leaves out films going straight to streaming or only showing elsewhere.
+    /// `None` takes every upcoming movie on TMDB.
+    pub upcoming_region: Option<Region>,
+    /// Pages of recent releases to rate per [`RECENT_SLICE_MONTHS`] slice (20 per page).
+    pub recent_pages: u32,
+    /// How far back "recent" reaches, in months.
+    pub recent_months: u32,
+    /// Recent releases need at least this many TMDB audience votes, so the list
+    /// sticks to films people have actually seen.
+    pub recent_min_votes: u32,
     /// Pages of `/movie/popular` in the rarity reference set.
     pub reference_pages: u32,
 }
@@ -29,6 +45,10 @@ impl Default for CatalogOptions {
     fn default() -> Self {
         Self {
             upcoming_pages: 2,
+            upcoming_region: None,
+            recent_pages: 1,
+            recent_months: 12,
+            recent_min_votes: 50,
             reference_pages: 5,
         }
     }
@@ -36,8 +56,10 @@ impl Default for CatalogOptions {
 
 #[derive(Debug, Clone, Default)]
 pub struct Catalog {
-    /// Movies releasing soon: the candidates for "upcoming for you".
+    /// Movies releasing today or later: the candidates for "upcoming for you".
     pub upcoming: Vec<MovieDetails>,
+    /// Movies released before today, within the recent window.
+    pub recent: Vec<MovieDetails>,
     /// Popular movies, used only to judge how rare each feature is.
     pub reference: Vec<MovieDetails>,
 }
@@ -46,21 +68,109 @@ pub struct Catalog {
 #[derive(Debug, Serialize, Deserialize)]
 struct CatalogIds {
     upcoming: Vec<u64>,
+    #[serde(default)]
+    recent: Vec<u64>,
     reference: Vec<u64>,
+}
+
+/// The cache key for the catalog with `options` on the day `windows` describe.
+/// Today's date is part of it, so the lists (and where upcoming ends and recent
+/// begins) move on every day. Use it in tests, never a literal key.
+pub fn catalog_cache_key(options: &CatalogOptions, windows: &ReleaseWindows) -> String {
+    format!(
+        "catalog-v3-u{}-{}-c{}-m{}-v{}-r{}-{}",
+        options.upcoming_pages,
+        options
+            .upcoming_region
+            .map_or_else(|| "all".to_string(), |r| r.to_string()),
+        options.recent_pages,
+        options.recent_months,
+        options.recent_min_votes,
+        options.reference_pages,
+        windows.upcoming_from
+    )
+}
+
+/// The release dates each list covers, as `YYYY-MM-DD` (which compares correctly
+/// as text). Upcoming is `upcoming_from` onward; recent is `recent_from` to
+/// `recent_to` inclusive, ending the day before upcoming starts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReleaseWindows {
+    pub upcoming_from: String,
+    pub recent_from: String,
+    pub recent_to: String,
+    /// The recent window in [`RECENT_SLICE_MONTHS`] slices, newest first, as
+    /// inclusive `(from, to)` ranges that together cover `recent_from..=recent_to`.
+    pub recent_slices: Vec<(String, String)>,
+}
+
+impl ReleaseWindows {
+    /// The windows as of `today` (days since 1970-01-01), with recent reaching back
+    /// `recent_months` months.
+    pub fn new(today: i64, recent_months: u32) -> Self {
+        let date = Date::from_unix_days(today);
+        let mut recent_slices = Vec::new();
+        // Each slice ends the day before the newer one starts; the newest ends yesterday.
+        let mut next_start = date;
+        let mut back = 0;
+        while back < recent_months {
+            back = (back + RECENT_SLICE_MONTHS).min(recent_months);
+            let start = date.months_earlier(back);
+            let end = Date::from_unix_days(next_start.to_unix_days() - 1);
+            recent_slices.push((start.to_string(), end.to_string()));
+            next_start = start;
+        }
+        Self {
+            upcoming_from: date.to_string(),
+            recent_from: date.months_earlier(recent_months).to_string(),
+            recent_to: Date::from_unix_days(today - 1).to_string(),
+            recent_slices,
+        }
+    }
+}
+
+/// `movies` with at least `min` TMDB audience votes.
+pub fn with_min_votes(movies: Vec<MovieDetails>, min: u32) -> Vec<MovieDetails> {
+    movies
+        .into_iter()
+        .filter(|m| m.vote_count.unwrap_or(0) >= min)
+        .collect()
+}
+
+/// `movies` released on or after `from` and, when given, on or before `to`
+/// (`YYYY-MM-DD`). Movies without a release date are left out.
+pub fn released_between(
+    movies: Vec<MovieDetails>,
+    from: &str,
+    to: Option<&str>,
+) -> Vec<MovieDetails> {
+    movies
+        .into_iter()
+        .filter(|m| {
+            let date = m.release_date.as_str();
+            !date.is_empty() && date >= from && to.is_none_or(|to| date <= to)
+        })
+        .collect()
+}
+
+/// Today as days since 1970-01-01, by the computer's local calendar date (not UTC),
+/// so a film counts as upcoming on its release day wherever the user is.
+pub fn today() -> i64 {
+    use chrono::Datelike;
+    // num_days_from_ce counts 0001-01-01 as day 1; 1970-01-01 is day 719,163.
+    i64::from(chrono::Local::now().date_naive().num_days_from_ce()) - 719_163
 }
 
 impl Catalog {
     /// The catalog from cache if it's less than [`CATALOG_MAX_AGE`] old, otherwise
     /// freshly listed from TMDB.
     pub async fn load(fetcher: &Fetcher, options: CatalogOptions) -> Result<Self> {
-        let key = format!(
-            "catalog-u{}-r{}",
-            options.upcoming_pages, options.reference_pages
-        );
+        let windows = ReleaseWindows::new(today(), options.recent_months);
+        let key = catalog_cache_key(&options, &windows);
         let ids = match fetcher.cache().and_then(|c| c.get(&key, CATALOG_MAX_AGE)) {
             Some(ids) => ids,
             None => {
-                let ids = list_catalog(fetcher, options).await?;
+                let ids = list_catalog(fetcher, options, &windows).await?;
                 if let Some(cache) = fetcher.cache() {
                     cache.put_or_warn(&key, &ids);
                 }
@@ -69,9 +179,23 @@ impl Catalog {
         };
         // The ids may be a day old, so a movie TMDB has removed since is skipped
         // rather than failing every run until the cached list expires. Any other
-        // failure fails the load, so a network blip can't skew the catalog.
+        // failure fails the load, so a network blip can't skew the catalog. The
+        // release dates (and recent vote counts) are checked again here, since a
+        // film's date can change and cached details can be older than the list.
         Ok(Self {
-            upcoming: fetcher.available_details(&ids.upcoming).await?,
+            upcoming: released_between(
+                fetcher.available_details(&ids.upcoming).await?,
+                &windows.upcoming_from,
+                None,
+            ),
+            recent: with_min_votes(
+                released_between(
+                    fetcher.available_details(&ids.recent).await?,
+                    &windows.recent_from,
+                    Some(&windows.recent_to),
+                ),
+                options.recent_min_votes,
+            ),
             reference: fetcher.available_details(&ids.reference).await?,
         })
     }
@@ -81,6 +205,7 @@ impl Catalog {
         let documents: Vec<_> = self
             .upcoming
             .iter()
+            .chain(&self.recent)
             .chain(&self.reference)
             .map(|movie| features::extract(movie, weights))
             .collect();
@@ -88,14 +213,43 @@ impl Catalog {
     }
 }
 
-async fn list_catalog(fetcher: &Fetcher, options: CatalogOptions) -> Result<CatalogIds> {
+async fn list_catalog(
+    fetcher: &Fetcher,
+    options: CatalogOptions,
+    windows: &ReleaseWindows,
+) -> Result<CatalogIds> {
     let client = fetcher.client();
-    // Every id appears once, even if it's both upcoming and popular.
+    // Every id appears once, even if it's both recent (or upcoming) and popular.
     let mut seen = HashSet::new();
-    let upcoming = list_ids(options.upcoming_pages, &mut seen, |p| client.upcoming(p)).await?;
+    let upcoming = list_ids(options.upcoming_pages, &mut seen, |p| {
+        let query = Discover {
+            from: Some(&windows.upcoming_from),
+            theatrical_in: options.upcoming_region,
+            ..Discover::default()
+        };
+        client.discover(query, p)
+    })
+    .await?;
+    // Popularity favours the newest releases, so each slice gets its own pages.
+    let mut recent = Vec::new();
+    for (from, to) in &windows.recent_slices {
+        recent.extend(
+            list_ids(options.recent_pages, &mut seen, |p| {
+                let query = Discover {
+                    from: Some(from),
+                    to: Some(to),
+                    min_votes: options.recent_min_votes,
+                    ..Discover::default()
+                };
+                client.discover(query, p)
+            })
+            .await?,
+        );
+    }
     let reference = list_ids(options.reference_pages, &mut seen, |p| client.popular(p)).await?;
     Ok(CatalogIds {
         upcoming,
+        recent,
         reference,
     })
 }
