@@ -166,10 +166,12 @@ pub fn leave_one_out_with_quality(
 /// score), as `(average over all of `others`, estimate for this candidate)`.
 ///
 /// The candidate's estimate uses the same neighbour rules as [`scoring::predict`]:
-/// the [`NEIGHBOURS`] most similar movies, weighted by (similarity / closest) ^
+/// the [`NEIGHBOURS`] most similar movies (all of those tied for the last place,
+/// sharing its remaining places), weighted by (similarity / closest) ^
 /// [`SIMILARITY_POWER`], blended with the average difference by count as
-/// `(n × weighted + OVERALL_SHRINK × average) / (n + OVERALL_SHRINK)`. Movies without
-/// audience votes are skipped. `None` when none of `others` has votes.
+/// `(n × weighted + OVERALL_SHRINK × average) / (n + OVERALL_SHRINK)` with `n` at most
+/// [`NEIGHBOURS`]. Movies without audience votes are skipped. `None` when none of
+/// `others` has votes.
 fn audience_differences(
     others: &[RatedDetails],
     profile: &TasteProfile,
@@ -190,17 +192,31 @@ fn audience_differences(
     let average = diffs.iter().map(|(_, d)| d).sum::<f32>() / diffs.len() as f32;
 
     diffs.retain(|(similarity, _)| *similarity > 0.0);
-    // Stable sort, like scoring: ties keep rating-file order.
     diffs.sort_by(|a, b| b.0.total_cmp(&a.0));
-    diffs.truncate(NEIGHBOURS);
+    // As in scoring::predict: movies tied with the last neighbour all stay and share
+    // its remaining places, so the result never depends on rating-file order.
+    let mut tie_share = 1.0;
+    let mut cutoff = f32::NEG_INFINITY;
+    if diffs.len() > NEIGHBOURS {
+        cutoff = diffs[NEIGHBOURS - 1].0;
+        let above = diffs.iter().take_while(|(s, _)| *s > cutoff).count();
+        let kept = diffs.iter().take_while(|(s, _)| *s >= cutoff).count();
+        tie_share = (NEIGHBOURS - above) as f32 / (kept - above) as f32;
+        diffs.truncate(kept);
+    }
     let top = diffs.first().map_or(0.0, |(s, _)| *s);
     let (mut total, mut weighted) = (0.0, 0.0);
     for (similarity, diff) in &diffs {
-        let weight = (similarity / top).powi(SIMILARITY_POWER);
+        let share = if *similarity == cutoff {
+            tie_share
+        } else {
+            1.0
+        };
+        let weight = (similarity / top).powi(SIMILARITY_POWER) * share;
         total += weight;
         weighted += weight * diff;
     }
-    let n = diffs.len() as f32;
+    let n = diffs.len().min(NEIGHBOURS) as f32;
     let similar = if total > 0.0 {
         (n * (weighted / total) + OVERALL_SHRINK * average) / (n + OVERALL_SHRINK)
     } else {
