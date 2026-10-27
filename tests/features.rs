@@ -1,4 +1,5 @@
 use movie_match::features::{self, FieldWeights};
+use movie_match::quality;
 use movie_match::tfidf::{Idf, Vector};
 use movie_match::tmdb::MovieDetails;
 
@@ -121,4 +122,31 @@ fn trimming_unused_credits_keeps_features_and_labels() {
         features::labels(&trimmed, &weights),
         features::labels(&full, &weights)
     );
+}
+
+#[test]
+fn trimming_keeps_cast_past_the_weights_limit_when_asked() {
+    let weights = FieldWeights {
+        cast_limit: 2,
+        ..FieldWeights::default()
+    };
+    let full = fixture();
+    let quality_cast = 4;
+
+    let mut trimmed = full.clone();
+    features::trim_keeping_cast(&mut trimmed, &weights, quality_cast);
+    assert_eq!(trimmed.credits.cast.len(), quality_cast);
+    assert_eq!(
+        quality::credits(&trimmed, &weights, quality_cast),
+        quality::credits(&full, &weights, quality_cast)
+    );
+    assert_eq!(
+        features::extract(&trimmed, &weights),
+        features::extract(&full, &weights)
+    );
+
+    // A smaller limit never cuts below what scoring reads.
+    let mut trimmed = full.clone();
+    features::trim_keeping_cast(&mut trimmed, &weights, 1);
+    assert_eq!(trimmed.credits.cast.len(), weights.cast_limit);
 }
