@@ -10,6 +10,7 @@ use std::time::Duration;
 use common::tmdb::{local_client, serve_once, serve_once_recording, serve_with};
 use common::{movie, Spec};
 use movie_match::cache::DiskCache;
+use movie_match::catalog::{catalog_cache_key, today, ReleaseWindows};
 use movie_match::fetch::{details_cache_key, Fetcher};
 use movie_match::profile::RatedMovie;
 use movie_match::recommend::{explain_movie, resolve, Options, Resolved};
@@ -25,24 +26,27 @@ fn temp_dir(name: &str) -> PathBuf {
     dir
 }
 
-/// A cache holding a catalog of just `upcoming` (with their details), so loading
-/// the catalog with default options makes no requests.
+/// A cache holding a catalog of just `upcoming` (with their details, undated ones
+/// dated today so they count as upcoming), so loading the catalog with default
+/// options makes no requests.
 fn cache_with_upcoming(dir: &Path, upcoming: &[MovieDetails]) -> DiskCache {
     let options = Options::default().catalog;
+    let windows = ReleaseWindows::new(today(), options.recent_months);
     let cache = DiskCache::new(dir);
     let ids: Vec<u64> = upcoming.iter().map(|m| m.id).collect();
     cache
         .put(
-            &format!(
-                "catalog-u{}-r{}",
-                options.upcoming_pages, options.reference_pages
-            ),
-            &serde_json::json!({ "upcoming": ids, "reference": [] }),
+            &catalog_cache_key(&options, &windows),
+            &serde_json::json!({ "upcoming": ids, "recent": [], "reference": [] }),
         )
         .expect("write catalog");
     for m in upcoming {
+        let mut m = m.clone();
+        if m.release_date.is_empty() {
+            m.release_date = windows.upcoming_from.clone();
+        }
         cache
-            .put(&details_cache_key(m.id), m)
+            .put(&details_cache_key(m.id), &m)
             .expect("write details");
     }
     cache

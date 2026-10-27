@@ -3,6 +3,7 @@
 pub mod cache;
 pub mod catalog;
 pub mod config;
+pub mod dates;
 pub mod evaluate;
 pub mod features;
 pub mod fetch;

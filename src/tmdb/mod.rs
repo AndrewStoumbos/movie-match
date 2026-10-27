@@ -9,6 +9,57 @@ use serde::de::DeserializeOwned;
 
 const BASE_URL: &str = "https://api.themoviedb.org/3";
 
+/// A country as TMDB names it: an ISO 3166-1 two-letter code such as `US` or `GB`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Region([u8; 2]);
+
+impl Region {
+    /// The region for a two-letter code in either case, ignoring surrounding
+    /// whitespace; `None` for anything else.
+    pub fn parse(code: &str) -> Option<Self> {
+        match code.trim().as_bytes() {
+            &[a, b] if a.is_ascii_alphabetic() && b.is_ascii_alphabetic() => {
+                Some(Self([a.to_ascii_uppercase(), b.to_ascii_uppercase()]))
+            }
+            _ => None,
+        }
+    }
+
+    /// The country in a locale name such as `en-US`, `zh-Hans-CN` or `en_GB.UTF-8`;
+    /// `None` when it names only a language, like `en`.
+    pub fn from_locale(locale: &str) -> Option<Self> {
+        let name = locale.split('.').next().unwrap_or_default();
+        let mut parts = name.split(['-', '_']);
+        parts.next(); // The language.
+        parts.find(|part| part.len() == 2).and_then(Self::parse)
+    }
+
+    pub fn as_str(&self) -> &str {
+        // Both bytes are ASCII letters, so this is always valid UTF-8.
+        std::str::from_utf8(&self.0).unwrap_or_default()
+    }
+}
+
+impl std::fmt::Display for Region {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// What to ask `/discover/movie` for: see [`TmdbClient::discover`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Discover<'a> {
+    /// Earliest primary release date (inclusive, `YYYY-MM-DD`); `None` leaves it open.
+    pub from: Option<&'a str>,
+    /// Latest primary release date (inclusive, `YYYY-MM-DD`); `None` leaves it open.
+    pub to: Option<&'a str>,
+    /// Fewest audience votes; 0 for no minimum.
+    pub min_votes: u32,
+    /// Only movies with a theatrical release (limited or wide) listed for this
+    /// country, dated between `from` and `to` too.
+    pub theatrical_in: Option<Region>,
+}
+
 /// Whether `err` comes from TMDB answering 404 Not Found, meaning it has no such
 /// resource (say a movie it has since removed). Other failures, such as timeouts,
 /// rate limits, server errors or undecodable bodies, are not.
@@ -53,6 +104,40 @@ impl TmdbClient {
     pub async fn popular(&self, page: u32) -> Result<Page<Movie>> {
         self.get("/movie/popular", &[("page", page.to_string())])
             .await
+    }
+
+    /// One page of the movies `query` describes, most popular first, from
+    /// `/discover/movie`.
+    pub async fn discover(&self, query: Discover<'_>, page: u32) -> Result<Page<Movie>> {
+        let mut params = vec![
+            ("sort_by", "popularity.desc".to_string()),
+            ("include_adult", "false".to_string()),
+            ("include_video", "false".to_string()),
+            ("page", page.to_string()),
+        ];
+        if query.min_votes > 0 {
+            params.push(("vote_count.gte", query.min_votes.to_string()));
+        }
+        if let Some(from) = query.from {
+            params.push(("primary_release_date.gte", from.to_string()));
+        }
+        if let Some(to) = query.to {
+            params.push(("primary_release_date.lte", to.to_string()));
+        }
+        if let Some(region) = query.theatrical_in {
+            // Release types 2 and 3: theatrical (limited) or theatrical. TMDB applies
+            // them only with `release_date` bounds, which match that country's
+            // release dates rather than the first one anywhere.
+            params.push(("region", region.to_string()));
+            params.push(("with_release_type", "2|3".to_string()));
+            if let Some(from) = query.from {
+                params.push(("release_date.gte", from.to_string()));
+            }
+            if let Some(to) = query.to {
+                params.push(("release_date.lte", to.to_string()));
+            }
+        }
+        self.get("/discover/movie", &params).await
     }
 
     /// TMDB's best match for `title`, optionally narrowed to a release year.

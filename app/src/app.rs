@@ -13,7 +13,7 @@ use movie_match::import;
 use movie_match::profile::{self, RatedMovie, DISLIKED_UP_TO, LIKED_FROM};
 use movie_match::recommend::{self, Options, Ranking};
 use movie_match::scoring::{Explanation, Ranked};
-use movie_match::tmdb::{MovieDetails, TmdbClient};
+use movie_match::tmdb::{MovieDetails, Region, TmdbClient};
 use tokio::runtime::Runtime;
 
 use crate::jobs::Job;
@@ -26,6 +26,7 @@ const LETTERBOXD_EXPORT_URL: &str = "https://letterboxd.com/settings/data/";
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Upcoming,
+    Recent,
     Explain,
     Ratings,
     Settings,
@@ -171,7 +172,11 @@ impl MovieMatchApp {
         Options {
             catalog: CatalogOptions {
                 upcoming_pages: self.settings.upcoming_pages,
+                upcoming_region: Region::parse(&self.settings.upcoming_region),
+                recent_pages: self.settings.recent_pages,
+                recent_months: self.settings.recent_months,
                 reference_pages: self.settings.reference_pages,
+                ..CatalogOptions::default()
             },
             ..Options::default()
         }
@@ -433,6 +438,7 @@ impl MovieMatchApp {
             ui.add_space(18.0);
             for (tab, label) in [
                 (Tab::Upcoming, "Upcoming"),
+                (Tab::Recent, "Recent"),
                 (Tab::Explain, "Explain a movie"),
                 (Tab::Ratings, "My ratings"),
                 (Tab::Settings, "Settings"),
@@ -528,14 +534,21 @@ impl MovieMatchApp {
         action
     }
 
-    fn upcoming_tab(&mut self, ui: &mut egui::Ui) -> Option<Action> {
+    /// The Upcoming (today or later) or, with `recent`, the Recent releases list.
+    fn list_tab(&mut self, ui: &mut egui::Ui, recent: bool) -> Option<Action> {
         if let Some(needed) = self.missing_setup() {
             return self.setup_prompt(ui, &needed);
         }
         let mut action = None;
         let idle = self.ranking_job.is_none();
+        let months = self.settings.recent_months;
+        let kind = if recent { "recent" } else { "upcoming" };
 
-        ui.heading("Upcoming releases, ranked for you");
+        ui.heading(if recent {
+            format!("Recent releases (the last {months} months), ranked for you")
+        } else {
+            "Upcoming releases, ranked for you".to_string()
+        });
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.add(
@@ -577,7 +590,7 @@ impl MovieMatchApp {
                 ui.horizontal(|ui| {
                     ui.spinner();
                     ui.label(
-                        "Matching your ratings and ranking upcoming movies. \
+                        "Matching your ratings and ranking upcoming and recent movies. \
                          The first run can take a minute; later runs are quick.",
                     );
                 });
@@ -585,15 +598,25 @@ impl MovieMatchApp {
             return action;
         };
 
+        let list = if recent {
+            &ranking.recent
+        } else {
+            &ranking.ranked
+        };
         let rated = &ranking.resolved.rated;
         let liked = rated.iter().filter(|r| r.rating >= LIKED_FROM).count();
         let disliked = rated.iter().filter(|r| r.rating <= DISLIKED_UP_TO).count();
+        let which = if recent {
+            "released before today"
+        } else {
+            "out today or later"
+        };
         ui.label(
             RichText::new(format!(
-                "Based on {} rated movies ({liked} liked, {disliked} disliked) · {} upcoming releases. \
-                 Scores are your predicted rating × 10.",
+                "Based on {} rated movies ({liked} liked, {disliked} disliked) · {} {kind} releases, \
+                 {which}. Scores are your predicted rating × 10.",
                 rated.len(),
-                ranking.ranked.len()
+                list.len()
             ))
             .weak(),
         );
@@ -604,20 +627,23 @@ impl MovieMatchApp {
         egui::ScrollArea::vertical()
             .auto_shrink(false)
             .show(ui, |ui| {
-                let shown = ranking
-                    .ranked
+                let shown = list
                     .iter()
                     .filter(|r| filter.is_empty() || r.movie.title.to_lowercase().contains(&filter))
                     .take(limit);
                 let mut any = false;
                 for (i, ranked) in shown.enumerate() {
                     any = true;
-                    if movie_card(ui, i + 1, ranked) {
+                    if movie_card(ui, i + 1, ranked, recent) {
                         action = Some(Action::Explain(ranked.movie.title.clone()));
                     }
                 }
                 if !any {
-                    ui.label("No upcoming movies match that filter.");
+                    if list.is_empty() {
+                        ui.label(format!("No {kind} releases found."));
+                    } else {
+                        ui.label(format!("No {kind} movies match that filter."));
+                    }
                 }
             });
         action
@@ -878,6 +904,39 @@ impl MovieMatchApp {
                     ui.horizontal(|ui| {
                         settings_changed |= ui
                             .add(
+                                egui::TextEdit::singleline(&mut self.settings.upcoming_region)
+                                    .char_limit(2)
+                                    .desired_width(28.0),
+                            )
+                            .changed();
+                        ui.label("country: Upcoming shows only films in cinemas there (blank for all)");
+                    });
+                    let region = self.settings.upcoming_region.trim();
+                    if !region.is_empty() && Region::parse(region).is_none() {
+                        ui.colored_label(
+                            ui.visuals().warn_fg_color,
+                            "Use a two-letter country code such as US or GB. Until then,                              Upcoming shows films from every country.",
+                        );
+                    }
+                    ui.horizontal(|ui| {
+                        settings_changed |= ui
+                            .add(egui::DragValue::new(&mut self.settings.recent_pages).range(0..=10))
+                            .changed();
+                        ui.label("pages of recent releases to rate per 3 months");
+                    });
+                    ui.horizontal(|ui| {
+                        settings_changed |= ui
+                            .add(
+                                egui::DragValue::new(&mut self.settings.recent_months)
+                                    .range(1..=24)
+                                    .suffix(" months"),
+                            )
+                            .changed();
+                        ui.label("how far back Recent reaches");
+                    });
+                    ui.horizontal(|ui| {
+                        settings_changed |= ui
+                            .add(
                                 egui::DragValue::new(&mut self.settings.reference_pages)
                                     .range(0..=20),
                             )
@@ -935,7 +994,8 @@ impl eframe::App for MovieMatchApp {
             .show(ui, |ui| {
                 self.notice_banner(ui);
                 match self.tab {
-                    Tab::Upcoming => self.upcoming_tab(ui),
+                    Tab::Upcoming => self.list_tab(ui, false),
+                    Tab::Recent => self.list_tab(ui, true),
                     Tab::Explain => self.explain_tab(ui),
                     Tab::Ratings => self.ratings_tab(ui),
                     Tab::Settings => self.settings_tab(ui),
@@ -963,7 +1023,9 @@ fn section(ui: &mut egui::Ui, title: &str, add_contents: impl FnOnce(&mut egui::
 }
 
 /// One ranked movie. Returns `true` when "Why this score?" was clicked.
-fn movie_card(ui: &mut egui::Ui, position: usize, ranked: &Ranked) -> bool {
+/// One ranked movie. With `recent`, the audience score is always mentioned (or that
+/// there isn't one yet); upcoming films only show it when early votes exist.
+fn movie_card(ui: &mut egui::Ui, position: usize, ranked: &Ranked, recent: bool) -> bool {
     let mut explain = false;
     egui::Frame::group(ui.style())
         .inner_margin(10.0)
@@ -981,6 +1043,22 @@ fn movie_card(ui: &mut egui::Ui, position: usize, ranked: &Ranked) -> bool {
                             score_badge(ui, ranked.score);
                         });
                     });
+                    match (ranked.movie.audience_rating(), ranked.movie.vote_count) {
+                        (Some(score), Some(votes)) => {
+                            let label = if recent { "Audience" } else { "Early audience" };
+                            ui.label(
+                                RichText::new(format!(
+                                    "{label} {score:.1}/10 · {} votes",
+                                    thousands(votes)
+                                ))
+                                .weak(),
+                            );
+                        }
+                        _ if recent => {
+                            ui.label(RichText::new("No audience ratings yet").weak());
+                        }
+                        _ => {}
+                    }
                     if let Some((title, rating)) = &ranked.closest_liked {
                         let because = if ranked.reasons.is_empty() {
                             String::new()
@@ -1190,6 +1268,19 @@ fn rating_text(rating: f32) -> String {
     }
 }
 
+/// `1234567` as `1,234,567`.
+fn thousands(n: u32) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, digit) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
+}
+
 /// `text` cut to about `max_chars` characters at a word boundary.
 fn shorten(text: &str, max_chars: usize) -> String {
     if text.chars().count() <= max_chars {
@@ -1219,7 +1310,7 @@ fn apply_resolved_ids(movies: &mut [RatedMovie], ids: &[Option<u64>]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_resolved_ids, parse_tmdb_id, shorten};
+    use super::{apply_resolved_ids, parse_tmdb_id, shorten, thousands};
     use movie_match::profile::RatedMovie;
 
     fn rated(title: &str, tmdb_id: Option<u64>) -> RatedMovie {
@@ -1252,6 +1343,14 @@ mod tests {
             &[Some(603), Some(1), Some(2)]
         ));
         assert!(movies.iter().all(|m| m.tmdb_id.is_none()));
+    }
+
+    #[test]
+    fn vote_counts_get_thousands_separators() {
+        assert_eq!(thousands(0), "0");
+        assert_eq!(thousands(999), "999");
+        assert_eq!(thousands(2300), "2,300");
+        assert_eq!(thousands(1234567), "1,234,567");
     }
 
     #[test]

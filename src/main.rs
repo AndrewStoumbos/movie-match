@@ -11,7 +11,7 @@ use movie_match::fetch::Fetcher;
 use movie_match::movielens;
 use movie_match::profile::{self, RatedMovie, DISLIKED_UP_TO, LIKED_FROM};
 use movie_match::recommend::{self, Options};
-use movie_match::tmdb::TmdbClient;
+use movie_match::tmdb::{Region, TmdbClient};
 
 /// Rate upcoming movies by how likely you are to enjoy them.
 #[derive(Parser)]
@@ -21,9 +21,32 @@ struct Cli {
     #[arg(short, long, default_value = "data/liked_movies.toml")]
     liked: PathBuf,
 
-    /// Pages of upcoming releases to rate (20 movies per page).
+    /// Pages of upcoming releases (today or later) to rate (20 movies per page).
     #[arg(long, default_value_t = 2)]
     pages: u32,
+
+    /// Rank recent releases (before today, within --recent-months) instead of
+    /// upcoming ones.
+    #[arg(long)]
+    recent: bool,
+
+    /// Only rank upcoming movies with a cinema release listed for this country (a
+    /// two-letter code such as US or GB). Without it, every upcoming movie on TMDB.
+    #[arg(long, value_parser = parse_region)]
+    region: Option<Region>,
+
+    /// Pages of recent releases to rate per 3 months of --recent-months (20 movies
+    /// per page).
+    #[arg(long, default_value_t = 1)]
+    recent_pages: u32,
+
+    /// How far back "recent" reaches, in months.
+    #[arg(long, default_value_t = 12)]
+    recent_months: u32,
+
+    /// Recent releases need at least this many TMDB audience votes.
+    #[arg(long, default_value_t = 50)]
+    recent_min_votes: u32,
 
     /// Pages of popular movies used to judge how rare each feature is.
     #[arg(long, default_value_t = 5)]
@@ -104,6 +127,10 @@ async fn main() -> Result<()> {
     let options = Options {
         catalog: CatalogOptions {
             upcoming_pages: cli.pages,
+            upcoming_region: cli.region,
+            recent_pages: cli.recent_pages,
+            recent_months: cli.recent_months,
+            recent_min_votes: cli.recent_min_votes,
             reference_pages: cli.reference_pages,
         },
         ..Options::default()
@@ -151,10 +178,28 @@ async fn main() -> Result<()> {
         eprintln!("warning: no TMDB match for \"{title}\"");
     }
 
-    println!("\nUpcoming releases, best match first:");
-    for ranked in ranking.ranked.iter().take(cli.top) {
+    let (heading, list) = if cli.recent {
+        (
+            format!(
+                "Recent releases (the last {} months), best match first:",
+                cli.recent_months
+            ),
+            &ranking.recent,
+        )
+    } else {
+        (
+            "Upcoming releases (today or later), best match first:".to_string(),
+            &ranking.ranked,
+        )
+    };
+    println!("\n{heading}");
+    for ranked in list.iter().take(cli.top) {
+        let audience = match (ranked.movie.audience_rating(), ranked.movie.vote_count) {
+            (Some(score), Some(votes)) => format!("  audience {score:.1} ({votes} votes)"),
+            _ => String::new(),
+        };
         println!(
-            "  {:>3}  {} [{}]",
+            "  {:>3}  {} [{}]{audience}",
             ranked.score, ranked.movie.title, ranked.movie.release_date
         );
         if let Some((title, rating)) = &ranked.closest_liked {
@@ -519,4 +564,8 @@ async fn evaluate_track_record(
     }
     println!("The check-half rows are the honest comparison: tuning never saw those films.");
     Ok(())
+}
+
+fn parse_region(code: &str) -> Result<Region, String> {
+    Region::parse(code).ok_or_else(|| format!("\"{code}\" is not a two-letter country code"))
 }
