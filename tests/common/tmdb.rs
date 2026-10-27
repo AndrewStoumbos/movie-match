@@ -1,8 +1,9 @@
 //! A local stand-in for the TMDB API, so client tests never need the network.
 
 use std::io::{Read, Write};
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 use std::sync::mpsc::{self, Receiver};
+use std::sync::Arc;
 use std::thread;
 
 use movie_match::tmdb::TmdbClient;
@@ -25,18 +26,44 @@ pub fn serve_once_recording(response: impl Into<String>) -> (String, Receiver<St
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("accept connection");
-        let mut request = Vec::new();
-        let mut buf = [0; 1024];
-        while !request.windows(4).any(|w| w == b"\r\n\r\n") {
-            match stream.read(&mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => request.extend_from_slice(&buf[..n]),
-            }
-        }
+        let request = read_request_head(&mut stream);
         let _ = stream.write_all(response.as_bytes());
-        let _ = sender.send(String::from_utf8_lossy(&request).into_owned());
+        let _ = sender.send(request);
     });
     (format!("http://{addr}"), receiver)
+}
+
+/// Serves any number of HTTP requests on a loopback port, concurrently, answering
+/// each with `respond(request head)`, and returns the base URL to send them to.
+/// Each connection serves one request, so responses should send `Connection: close`.
+pub fn serve_with(respond: impl Fn(&str) -> String + Send + Sync + 'static) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback listener");
+    let addr = listener.local_addr().expect("listener address");
+    let respond = Arc::new(respond);
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let respond = Arc::clone(&respond);
+            thread::spawn(move || {
+                let request = read_request_head(&mut stream);
+                let _ = stream.write_all(respond(&request).as_bytes());
+            });
+        }
+    });
+    format!("http://{addr}")
+}
+
+/// Reads a raw HTTP request head (request line and headers) from `stream`.
+fn read_request_head(stream: &mut TcpStream) -> String {
+    let mut request = Vec::new();
+    let mut buf = [0; 1024];
+    while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+        match stream.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => request.extend_from_slice(&buf[..n]),
+        }
+    }
+    String::from_utf8_lossy(&request).into_owned()
 }
 
 /// A client for the stand-in server at `base` that sends [`API_KEY`]. It ignores proxy

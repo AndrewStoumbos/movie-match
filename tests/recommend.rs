@@ -7,7 +7,7 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use common::tmdb::{local_client, serve_once, serve_once_recording};
+use common::tmdb::{local_client, serve_once, serve_once_recording, serve_with};
 use common::{movie, Spec};
 use movie_match::cache::DiskCache;
 use movie_match::fetch::{details_cache_key, Fetcher};
@@ -169,4 +169,95 @@ async fn other_tmdb_errors_still_fail_resolving() {
     .await
     .expect_err("a server error must not quietly drop a rating");
     assert!(format!("{err:#}").contains("500"), "{err:#}");
+}
+
+/// A `200 OK` JSON response that closes the connection.
+fn json_response(body: &str) -> String {
+    format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+#[tokio::test]
+async fn ids_line_up_with_the_inputs_one_to_one() {
+    let dir = temp_dir("ids-order");
+    let cache = DiskCache::new(&dir);
+    for id in [10, 20] {
+        let details = movie(
+            &format!("Movie {id}"),
+            Spec {
+                id,
+                ..Spec::default()
+            },
+        );
+        cache
+            .put(&details_cache_key(id), &details)
+            .expect("write details");
+    }
+    // Searches for "Found" hit movie 20 and every other search misses. Id 30 isn't
+    // cached, so its details are fetched, and TMDB doesn't have it.
+    let base = serve_with(|request| {
+        if !request.starts_with("GET /search/movie?") {
+            return "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                .to_string();
+        }
+        if query_param(request) == "Found" {
+            json_response(
+                r#"{"page":1,"results":[{"id":20,"title":"Movie 20","release_date":"2020-01-01"}],"total_pages":1,"total_results":1}"#,
+            )
+        } else {
+            json_response(r#"{"page":1,"results":[],"total_pages":1,"total_results":0}"#)
+        }
+    });
+    let fetcher = Fetcher::new(local_client(base), Some(cache));
+    let rated = |tmdb_id: Option<u64>, title: Option<&str>, rating: f32| RatedMovie {
+        tmdb_id,
+        title: title.map(String::from),
+        rating: Some(rating),
+        ..RatedMovie::default()
+    };
+    let movies = [
+        rated(None, Some("Missing"), 3.0),
+        rated(Some(10), Some("Saved"), 8.0),
+        rated(None, None, 5.0),
+        rated(None, Some("Found"), 7.0),
+        rated(Some(30), Some("Gone"), 6.0),
+        rated(Some(10), Some("Saved again"), 2.0),
+        rated(None, Some("Found"), 4.0),
+        rated(Some(20), None, 9.0),
+        rated(None, Some("Also missing"), 1.0),
+    ];
+
+    let resolved = resolve(&fetcher, &movies).await;
+    let _ = fs::remove_dir_all(&dir);
+    let resolved = resolved.expect("resolve");
+
+    // One id per input, in input order: a search miss, an entry with neither id nor
+    // title, and an id TMDB doesn't have are `None`; duplicates get their id again.
+    assert_eq!(
+        resolved.ids,
+        [
+            None,
+            Some(10),
+            None,
+            Some(20),
+            None,
+            Some(10),
+            Some(20),
+            Some(20),
+            None,
+        ]
+    );
+    // Duplicates keep the first rating.
+    let rated: Vec<_> = resolved
+        .rated
+        .iter()
+        .map(|r| (r.movie.id, r.rating))
+        .collect();
+    assert_eq!(rated, [(10, 8.0), (20, 7.0)]);
+    assert_eq!(
+        resolved.unmatched,
+        ["Missing", "untitled entry", "Also missing", "Gone"]
+    );
 }

@@ -108,7 +108,9 @@ Run the tests with `cargo test`.
    0.1, so only their ratios matter). Your **low ratings**, the bottom 40% of your own
    ratings (strictly below the rating at the 40% mark, so ties don't count), count 30%
    less than equally similar ones you rated higher. The line is relative to you: for a
-   generous rater it might be 8/10, for a harsh one 5/10.
+   generous rater it might be 8/10, for a harsh one 5/10. Rated movies tied for the
+   last of the 20 places (say 60 dramas a release shares only "Drama" with) are all
+   kept and split the places left, so the order of your ratings file never matters.
 
    The score is the weighted average of those neighbours' ratings × 10, blended with
    your overall average only by **how many** neighbours there are:

@@ -402,6 +402,132 @@ fn faint_matches_fall_back_on_the_neighbours_ratings_not_every_rating() {
 }
 
 #[test]
+fn more_tied_faint_matches_than_neighbours_all_count_whatever_the_file_order() {
+    // Sixty dramas: the first thirty rated 9, the last thirty rated 3.
+    let dramas: Vec<_> = (0..60)
+        .map(|i| {
+            movie(
+                "Drama",
+                Spec {
+                    id: 100 + i,
+                    genres: vec![DRAMA],
+                    keywords: vec![300 + i],
+                    directors: vec![400 + i],
+                    ..Spec::default()
+                },
+            )
+        })
+        .collect();
+    let rated_movies: Vec<_> = dramas
+        .iter()
+        .enumerate()
+        .map(|(i, m)| rated(m, if i < 30 { 9.0 } else { 3.0 }))
+        .collect();
+    let mut reversed = rated_movies.clone();
+    reversed.reverse();
+    // The candidate shares only the common Drama genre with every rated drama.
+    let candidate = movie(
+        "Candidate",
+        Spec {
+            id: 2,
+            genres: vec![DRAMA],
+            keywords: vec![900],
+            directors: vec![901],
+            ..Spec::default()
+        },
+    );
+    let comedies: Vec<_> = (0..20).map(|i| comedy(700 + i, 800 + i)).collect();
+    let explain = |rated_movies: &[_]| {
+        let p = profile(rated_movies, std::slice::from_ref(&candidate), &comedies);
+        movie_match::scoring::explain(&p, &candidate)
+    };
+    let in_order = explain(&rated_movies);
+    let in_reverse = explain(&reversed);
+
+    // All sixty are tied, so all are kept, splitting the 20 places three ways.
+    assert_eq!(in_order.neighbours.len(), 60);
+    let first = &in_order.neighbours[0];
+    assert!(in_order
+        .neighbours
+        .iter()
+        .all(|n| n.similarity == first.similarity));
+    assert!(first.similarity < 0.08, "faint: {}", first.similarity);
+    let high = in_order.neighbours.iter().find(|n| n.rating == 9.0);
+    assert!((high.map_or(0.0, |n| n.weight) - 1.0 / 3.0).abs() < 1e-5);
+    // Every drama counts equally (3 is at the low-rating cutoff, so not low), not
+    // just the first twenty 9s, which would predict (20 × 9 + 5 × 6) / 25 = 8.4.
+    assert!(!in_order
+        .neighbours
+        .iter()
+        .any(|n| n.rating < in_order.low_rating_cutoff));
+    assert!((in_order.neighbour_rating - 6.0).abs() < 1e-4);
+    // Still counted as 20 neighbours for the overall average's share.
+    assert!((in_order.overall_share - OVERALL_SHRINK / 25.0).abs() < 1e-6);
+    assert!(
+        (in_order.predicted_rating - 6.0).abs() < 1e-4,
+        "predicted {}",
+        in_order.predicted_rating
+    );
+    assert_eq!(in_order.score, 60);
+    // Reordering the same ratings changes nothing.
+    assert!((in_reverse.predicted_rating - in_order.predicted_rating).abs() < 1e-5);
+    assert_eq!(in_reverse.score, in_order.score);
+}
+
+#[test]
+fn movies_tied_for_the_last_neighbour_place_split_it() {
+    // One close 10/10 drama sharing a director, then 25 dramas sharing only the
+    // genre, tied for the 19 places left.
+    let close = movie(
+        "Close",
+        Spec {
+            id: 1,
+            genres: vec![DRAMA],
+            directors: vec![901],
+            ..Spec::default()
+        },
+    );
+    let faint = (0..25).map(|i| {
+        movie(
+            "Faint",
+            Spec {
+                id: 100 + i,
+                genres: vec![DRAMA],
+                keywords: vec![300 + i],
+                directors: vec![400 + i],
+                ..Spec::default()
+            },
+        )
+    });
+    let rated_movies: Vec<_> = std::iter::once(rated(&close, 10.0))
+        .chain(faint.map(|m| rated(&m, 8.0)))
+        .collect();
+    let candidate = movie(
+        "Candidate",
+        Spec {
+            id: 2,
+            genres: vec![DRAMA],
+            keywords: vec![900],
+            directors: vec![901],
+            ..Spec::default()
+        },
+    );
+    let comedies: Vec<_> = (0..20).map(|i| comedy(700 + i, 800 + i)).collect();
+    let p = profile(&rated_movies, std::slice::from_ref(&candidate), &comedies);
+    let explanation = movie_match::scoring::explain(&p, &candidate);
+
+    assert_eq!(explanation.neighbours.len(), 26);
+    assert_eq!(explanation.neighbours[0].title, "Close");
+    assert!((explanation.neighbours[0].weight - 1.0).abs() < 1e-6);
+    let top = explanation.neighbours[0].similarity;
+    for n in &explanation.neighbours[1..] {
+        let expected = (n.similarity / top).powi(SIMILARITY_POWER) * 19.0 / 25.0;
+        assert!((n.weight - expected).abs() < 1e-6, "weight {}", n.weight);
+    }
+    assert!((explanation.overall_share - OVERALL_SHRINK / 25.0).abs() < 1e-6);
+}
+
+#[test]
 fn closer_neighbours_count_by_similarity_squared() {
     // A 10/10 movie sharing a director and a genre with the candidate, and a 2/10
     // movie sharing only the genre.
