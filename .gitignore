@@ -9,3 +9,7 @@ data/liked_movies.toml
 
 # TMDB download cache
 data/cache/
+
+# MovieLens data and its TMDB cache: local only (licence forbids redistribution)
+data/movielens/
+data/movielens-cache/

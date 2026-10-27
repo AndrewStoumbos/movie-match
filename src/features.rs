@@ -149,6 +149,18 @@ pub fn extract(movie: &MovieDetails, weights: &FieldWeights) -> Features {
     features
 }
 
+/// Drops the credits [`extract`] never reads (crew other than directors and writers,
+/// cast past `weights.cast_limit`), so holding many movies takes far less memory.
+/// Features and labels come out the same.
+pub fn trim_to_used(movie: &mut MovieDetails, weights: &FieldWeights) {
+    movie
+        .credits
+        .crew
+        .retain(|c| c.job == "Director" || WRITER_JOBS.contains(&c.job.as_str()));
+    movie.credits.cast.sort_by_key(|actor| actor.order);
+    movie.credits.cast.truncate(weights.cast_limit);
+}
+
 /// Human-readable names for `movie`'s tokens, e.g. `dir:137427` → `director Denis Villeneuve`.
 pub fn labels(movie: &MovieDetails, weights: &FieldWeights) -> BTreeMap<String, String> {
     tokens(movie, weights)

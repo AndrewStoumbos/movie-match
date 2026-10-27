@@ -2,7 +2,7 @@
 
 pub mod models;
 
-pub use models::{Movie, MovieDetails, Page};
+pub use models::{CreditedFilm, Movie, MovieDetails, Page, PersonCredits};
 
 use anyhow::{Context, Result};
 use serde::de::DeserializeOwned;
@@ -69,6 +69,11 @@ impl TmdbClient {
     pub async fn movie_details(&self, id: u64) -> Result<MovieDetails> {
         let params = [("append_to_response", "keywords,credits".to_string())];
         self.get(&format!("/movie/{id}"), &params).await
+    }
+
+    /// Every movie one person acted in or worked on.
+    pub async fn person_movie_credits(&self, id: u64) -> Result<PersonCredits> {
+        self.get(&format!("/person/{id}/movie_credits"), &[]).await
     }
 
     /// GETs `path` and decodes the JSON body.

@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use futures::stream::{self, StreamExt, TryStreamExt};
 
 use crate::cache::DiskCache;
-use crate::tmdb::{self, MovieDetails, TmdbClient};
+use crate::tmdb::{self, CreditedFilm, MovieDetails, TmdbClient};
 
 /// How many TMDB requests to run at once. Well under TMDB's rate limit.
 pub const CONCURRENT_REQUESTS: usize = 8;
@@ -14,6 +14,9 @@ pub const CONCURRENT_REQUESTS: usize = 8;
 /// How long cached movie details are reused. Upcoming movies still gain cast and
 /// keywords, so this is kept short.
 pub const DETAILS_MAX_AGE: Duration = Duration::from_secs(3 * 24 * 60 * 60);
+
+/// How long a person's cached filmography is reused. Only new releases change it.
+pub const FILMOGRAPHY_MAX_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 pub struct Fetcher {
     client: TmdbClient,
@@ -118,10 +121,51 @@ impl Fetcher {
         }
         Ok(movie)
     }
+
+    /// Each person's films (see [`tmdb::PersonCredits::films`]), in the same order,
+    /// with `None` for people TMDB answers 404 for. Only the trimmed list is cached.
+    /// Any other error fails the call.
+    pub async fn filmographies(&self, people: &[u64]) -> Result<Vec<Option<Vec<CreditedFilm>>>> {
+        // Owned ids keep the futures `Send` (see `recommend::resolve`).
+        stream::iter(people.to_vec())
+            .map(|id| async move {
+                match self.one_filmography(id).await {
+                    Ok(films) => Ok(Some(films)),
+                    Err(err) if tmdb::is_not_found(&err) => Ok(None),
+                    Err(err) => Err(err),
+                }
+            })
+            .buffered(CONCURRENT_REQUESTS)
+            .try_collect()
+            .await
+    }
+
+    async fn one_filmography(&self, person: u64) -> Result<Vec<CreditedFilm>> {
+        let key = filmography_cache_key(person);
+        if let Some(films) = self.cache().and_then(|c| c.get(&key, FILMOGRAPHY_MAX_AGE)) {
+            return Ok(films);
+        }
+        let films = self
+            .client
+            .person_movie_credits(person)
+            .await
+            .with_context(|| format!("fetching films for TMDB person {person}"))?
+            .films();
+        if let Some(cache) = self.cache() {
+            cache.put_or_warn(&key, &films);
+        }
+        Ok(films)
+    }
+}
+
+/// The cache key for one person's trimmed filmography.
+pub fn filmography_cache_key(person: u64) -> String {
+    format!("filmography-v1/{person}")
 }
 
 /// The cache key for one movie's details.
 pub fn details_cache_key(id: u64) -> String {
-    // v2: details now keep the overview and poster; older entries lack them.
-    format!("details-v2/{id}")
+    // Bumped whenever MovieDetails keeps a new field, so older entries without it
+    // are fetched again. v2: overview and poster. v3: TMDB audience rating.
+    format!("details-v3/{id}")
 }
