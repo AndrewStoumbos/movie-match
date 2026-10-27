@@ -153,12 +153,22 @@ pub fn extract(movie: &MovieDetails, weights: &FieldWeights) -> Features {
 /// cast past `weights.cast_limit`), so holding many movies takes far less memory.
 /// Features and labels come out the same.
 pub fn trim_to_used(movie: &mut MovieDetails, weights: &FieldWeights) {
+    trim_keeping_cast(movie, weights, weights.cast_limit);
+}
+
+/// Like [`trim_to_used`], but keeps the top `max(weights.cast_limit, cast_limit)`
+/// billed actors, for callers that also read cast past `weights.cast_limit`
+/// (e.g. [`crate::quality::credits`] with a larger `cast_limit`).
+pub fn trim_keeping_cast(movie: &mut MovieDetails, weights: &FieldWeights, cast_limit: usize) {
     movie
         .credits
         .crew
         .retain(|c| c.job == "Director" || WRITER_JOBS.contains(&c.job.as_str()));
     movie.credits.cast.sort_by_key(|actor| actor.order);
-    movie.credits.cast.truncate(weights.cast_limit);
+    movie
+        .credits
+        .cast
+        .truncate(weights.cast_limit.max(cast_limit));
 }
 
 /// Human-readable names for `movie`'s tokens, e.g. `dir:137427` → `director Denis Villeneuve`.
