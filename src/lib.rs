@@ -3,10 +3,13 @@
 pub mod cache;
 pub mod catalog;
 pub mod config;
+pub mod evaluate;
 pub mod features;
 pub mod fetch;
 pub mod import;
+pub mod movielens;
 pub mod profile;
+pub mod quality;
 pub mod recommend;
 pub mod scoring;
 pub mod tfidf;

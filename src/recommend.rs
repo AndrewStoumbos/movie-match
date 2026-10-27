@@ -1,17 +1,21 @@
 //! The per-user steps: resolve a user's ratings to TMDB movies, then rank the
 //! shared catalog against them.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use anyhow::{Context, Result};
 use futures::stream::{self, StreamExt};
 
 use crate::catalog::{Catalog, CatalogOptions};
-use crate::features::FieldWeights;
+use crate::evaluate::{self, Evaluation, UsersReport};
+use crate::features::{self, FieldWeights};
 use crate::fetch::{Fetcher, CONCURRENT_REQUESTS};
+use crate::movielens::UserRatings;
 use crate::profile::{RatedDetails, RatedMovie, TasteProfile};
+use crate::quality;
 use crate::scoring::{self, Explanation, Ranked};
-use crate::tmdb::MovieDetails;
+use crate::tfidf::Idf;
+use crate::tmdb::{CreditedFilm, MovieDetails};
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Options {
@@ -57,6 +61,179 @@ pub async fn rank_upcoming(
     );
     let ranked = scoring::rank(&profile, &catalog.upcoming);
     Ok(Ranking { resolved, ranked })
+}
+
+/// Leave-one-out evaluation of the scoring on the user's own ratings (see
+/// [`evaluate::leave_one_out`]), using the shared catalog's rarity table like real
+/// rankings do.
+pub async fn evaluate_ratings(
+    fetcher: &Fetcher,
+    movies: &[RatedMovie],
+    options: &Options,
+) -> Result<(Resolved, Evaluation)> {
+    let catalog = Catalog::load(fetcher, options.catalog).await?;
+    let resolved = resolve(fetcher, movies).await?;
+    let evaluation = evaluate::leave_one_out(
+        &resolved.rated,
+        &catalog.idf(&options.weights),
+        options.weights,
+    );
+    Ok((resolved, evaluation))
+}
+
+/// The result of [`evaluate_movielens`].
+#[derive(Debug, Clone)]
+pub struct MovieLensEvaluation {
+    /// Distinct movies across all the users' ratings.
+    pub movies_requested: usize,
+    /// How many of them TMDB has (the rest answered 404 and are skipped).
+    pub movies_found: usize,
+    /// People whose filmographies were needed for quality estimates, if made.
+    pub people: Option<usize>,
+    pub report: UsersReport,
+    /// With quality estimates: movie-match plus a damped track-record nudge, tuned
+    /// on half the users and checked on the other half.
+    pub nudge: Option<evaluate::NudgeReport>,
+}
+
+/// Leave-one-out evaluation for every user in `users` (see
+/// [`evaluate::leave_one_out_each`]). Fetches TMDB details for all their movies,
+/// trimmed to the fields scoring uses, and builds the rarity table from those same
+/// movies. Users with fewer than two movies TMDB has are skipped.
+///
+/// With `quality_cast` set, also estimates each movie's audience score from its
+/// directors', writers' and top `quality_cast` actors' earlier films (fetching their
+/// filmographies) for the "est. quality" methods.
+pub async fn evaluate_movielens(
+    fetcher: &Fetcher,
+    users: &UserRatings,
+    weights: FieldWeights,
+    quality_cast: Option<usize>,
+) -> Result<MovieLensEvaluation> {
+    let ids: Vec<u64> = users
+        .values()
+        .flatten()
+        .map(|(id, _)| *id)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let mut details = BTreeMap::new();
+    for (id, found) in ids.iter().zip(fetcher.details_if_found(&ids).await?) {
+        if let Some(mut movie) = found {
+            features::trim_to_used(&mut movie, &weights);
+            details.insert(*id, movie);
+        }
+    }
+    let documents: Vec<_> = details
+        .values()
+        .map(|movie| features::extract(movie, &weights))
+        .collect();
+    let idf = Idf::from_documents(&documents);
+    let per_user: Vec<Vec<RatedDetails>> = users
+        .values()
+        .map(|ratings| {
+            ratings
+                .iter()
+                .filter_map(|(id, rating)| {
+                    Some(RatedDetails {
+                        movie: details.get(id)?.clone(),
+                        rating: *rating,
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .filter(|rated| rated.len() >= 2)
+        .collect();
+
+    let mut people_needed = None;
+    let mut typical_quality = None;
+    let estimates: Option<HashMap<u64, f32>> = match quality_cast {
+        None => None,
+        Some(cast_limit) => {
+            let people: Vec<u64> = details
+                .values()
+                .flat_map(|movie| quality::credits(movie, &weights, cast_limit))
+                .map(|credit| credit.person)
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            people_needed = Some(people.len());
+            let filmographies: HashMap<u64, Vec<CreditedFilm>> = people
+                .iter()
+                .zip(fetcher.filmographies(&people).await?)
+                .filter_map(|(person, films)| Some((*person, films?)))
+                .collect();
+            typical_quality = quality::typical_score(&filmographies);
+            typical_quality.map(|typical| {
+                details
+                    .values()
+                    .map(|movie| {
+                        let credits = quality::credits(movie, &weights, cast_limit);
+                        let found = quality::estimate(movie, &credits, &filmographies, typical);
+                        (movie.id, found.unwrap_or(typical))
+                    })
+                    .collect()
+            })
+        }
+    };
+
+    let evaluations = evaluate::leave_one_out_each(&per_user, &idf, weights, estimates.as_ref());
+    Ok(MovieLensEvaluation {
+        movies_requested: ids.len(),
+        movies_found: details.len(),
+        people: people_needed,
+        report: evaluate::across_users(&evaluations),
+        nudge: typical_quality.and_then(|typical| evaluate::tune_nudge(&evaluations, typical)),
+    })
+}
+
+/// The result of [`evaluate_track_record`].
+#[derive(Debug, Clone)]
+pub struct TrackRecordEvaluation {
+    /// Distinct people whose filmographies were needed.
+    pub people: usize,
+    pub report: quality::TrackRecordReport,
+    /// The estimator's settings tuned on half the films, checked on the other half.
+    pub tuning: quality::TuningReport,
+}
+
+/// How well cast and crew track records predict the audience score of `films`
+/// (see [`quality::evaluate_track_record`]), plus split-half tuning of the
+/// estimator's settings (see [`quality::tune`]). Fetches the films' details and
+/// every credited person's filmography (cached, trimmed).
+pub async fn evaluate_track_record(
+    fetcher: &Fetcher,
+    films: &[u64],
+    weights: FieldWeights,
+    cast_limit: usize,
+) -> Result<TrackRecordEvaluation> {
+    let targets: Vec<MovieDetails> = fetcher
+        .details_if_found(films)
+        .await?
+        .into_iter()
+        .flatten()
+        .map(|mut movie| {
+            features::trim_to_used(&mut movie, &weights);
+            movie
+        })
+        .collect();
+    let people: Vec<u64> = targets
+        .iter()
+        .flat_map(|movie| quality::credits(movie, &weights, cast_limit))
+        .map(|credit| credit.person)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let filmographies = people
+        .iter()
+        .zip(fetcher.filmographies(&people).await?)
+        .filter_map(|(person, films)| Some((*person, films?)))
+        .collect();
+    Ok(TrackRecordEvaluation {
+        people: people.len(),
+        report: quality::evaluate_track_record(&targets, &filmographies, &weights, cast_limit),
+        tuning: quality::tune(&targets, &filmographies, &weights, cast_limit),
+    })
 }
 
 /// Explains one movie's score for this user. `title`, trimmed of surrounding

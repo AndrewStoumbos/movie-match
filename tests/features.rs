@@ -99,3 +99,26 @@ fn tone_keywords_count_less_than_content_keywords() {
     assert!(weights.tone < weights.keyword);
     assert_eq!(labels["kw:325815"], "tone \"Farcical\"");
 }
+
+#[test]
+fn trimming_unused_credits_keeps_features_and_labels() {
+    let weights = FieldWeights::default();
+    let full = fixture();
+    let mut trimmed = full.clone();
+    features::trim_to_used(&mut trimmed, &weights);
+
+    assert_eq!(trimmed.credits.cast.len(), weights.cast_limit);
+    assert!(trimmed
+        .credits
+        .crew
+        .iter()
+        .all(|c| c.job == "Director" || c.job == "Screenplay" || c.job == "Writer"));
+    assert_eq!(
+        features::extract(&trimmed, &weights),
+        features::extract(&full, &weights)
+    );
+    assert_eq!(
+        features::labels(&trimmed, &weights),
+        features::labels(&full, &weights)
+    );
+}
