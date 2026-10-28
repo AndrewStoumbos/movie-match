@@ -8,8 +8,8 @@ mod common;
 
 use std::net::TcpListener;
 
-use common::tmdb::{local_client, serve_once, API_KEY as SECRET_KEY};
-use movie_match::tmdb::is_not_found;
+use common::tmdb::{local_client, serve_once, serve_once_recording, API_KEY as SECRET_KEY};
+use movie_match::tmdb::{is_not_found, TmdbClient};
 
 fn assert_key_not_leaked(err: &anyhow::Error) {
     for rendered in [
@@ -97,4 +97,33 @@ async fn only_404_counts_as_not_found() {
             .expect_err("request fails");
         assert!(!is_not_found(&err), "{err:#}");
     }
+}
+
+#[tokio::test]
+async fn a_server_client_sends_no_key_and_asks_under_tmdb() {
+    let body = r#"{"page":1,"results":[],"total_pages":1,"total_results":0}"#;
+    let (base, request) = serve_once_recording(format!(
+        "HTTP/1.1 200 OK
+Content-Type: application/json
+Content-Length: {}
+Connection: close
+
+{body}",
+        body.len()
+    ));
+    let http = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("build HTTP client");
+    // A trailing slash on the address is fine.
+    let client = TmdbClient::via_server_using(http, &format!("{base}/"));
+
+    client.popular(1).await.expect("an empty page");
+
+    let request = request
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("server saw the request");
+    let line = request.lines().next().unwrap_or_default();
+    assert!(line.starts_with("GET /tmdb/movie/popular?"), "{line}");
+    assert!(!line.contains("api_key"), "{line}");
 }

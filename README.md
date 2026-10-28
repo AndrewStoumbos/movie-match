@@ -48,6 +48,27 @@ To make a downloadable build, `cargo build --release -p movie-match-app` produce
 release. The exe isn't code-signed, so Windows SmartScreen or Smart App Control may warn
 before the first run.
 
+## Running a Movie Match server
+
+A server holds the TMDB API key so people using the app don't need their own. It
+answers only the TMDB requests the app makes and caches the answers for everyone.
+
+```bash
+cargo run --release -p movie-match-server    # uses TMDB_API_KEY from .env; listens on 127.0.0.1:8765
+```
+
+Or build and run both in one go, with the app already pointed at the server (closing
+the app stops the server):
+
+```bash
+cargo dev
+```
+
+Otherwise, in the app, set **Settings → Movie Match server** to `http://127.0.0.1:8765` (or run
+the CLI with `--server http://127.0.0.1:8765`). It listens only on this computer by
+default; `--listen 0.0.0.0:8765` opens it to the network, but there's no rate limiting
+yet, so only do that on a network you trust.
+
 ## Getting started
 
 1. Install Rust: https://rustup.rs

@@ -64,8 +64,22 @@ movies the user likes. See README.md for the roadmap.
   the library. Icon: `app/assets/make-icon.ps1` draws `icon.png` (window) and `icon.ico`
   (embedded in the exe by `app/build.rs` via winresource); edit the script, not the images.
 
+- `server/`       server crate `movie-match-server` (axum): holds `TMDB_API_KEY` and answers
+  the app's TMDB requests under `/tmdb` (`TmdbClient::via_server`, which sends no key),
+  so users need no key. Only the paths the app uses pass (`max_age`); TMDB statuses pass
+  through; 200s are cached for every user in `data/server-cache/`. Listens on
+  `127.0.0.1:8765` by default; no rate limiting yet, so don't expose it beyond the machine
+  without adding some.
+
+- `xtask/`        `cargo dev` (alias in `.cargo/config.toml`): release-builds the server and
+  the app, starts the server, opens the app with `MOVIE_MATCH_SERVER` set (the app's
+  fallback when no server is saved), and stops the server when the app closes. Std only.
+
 ## Commands
 - Build: `cargo build`
+- Build and run the server and the app together: `cargo dev`
+- Run the server: `cargo run -p movie-match-server` (key from `TMDB_API_KEY` / `.env`); the
+  app's Settings → "Movie Match server", or the CLI's `--server`, points at it
 - Run the desktop app: `cargo run -p movie-match-app` (release exe:
   `cargo build --release -p movie-match-app`)
 - Format: `cargo fmt --all` (CI checks `cargo fmt --all -- --check`)

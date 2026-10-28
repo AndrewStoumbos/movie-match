@@ -58,6 +58,11 @@ struct Cli {
     #[arg(short = 'n', long, default_value_t = 20)]
     top: usize,
 
+    /// Ask the Movie Match server at this address (e.g. http://127.0.0.1:8765)
+    /// instead of TMDB, so no TMDB_API_KEY is needed.
+    #[arg(long, value_name = "URL")]
+    server: Option<String>,
+
     /// Where downloaded TMDB data is cached between runs.
     #[arg(long, default_value = "data/cache")]
     cache_dir: PathBuf,
@@ -115,7 +120,12 @@ struct Cli {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let config = Config::from_env()?;
+    // A Movie Match server holds its own TMDB key; otherwise the key comes from the
+    // environment.
+    let client = match &cli.server {
+        Some(url) => TmdbClient::via_server(url),
+        None => TmdbClient::new(Config::from_env()?.tmdb_api_key),
+    };
 
     let cache = (!cli.no_cache).then(|| {
         let cache = DiskCache::new(&cli.cache_dir);
@@ -125,7 +135,7 @@ async fn main() -> Result<()> {
             cache
         }
     });
-    let fetcher = Fetcher::new(TmdbClient::new(config.tmdb_api_key), cache);
+    let fetcher = Fetcher::new(client, cache);
     let options = Options {
         catalog: CatalogOptions {
             upcoming_pages: cli.pages,

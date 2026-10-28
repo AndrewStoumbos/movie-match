@@ -20,6 +20,9 @@ const RATINGS_FILE: &str = "ratings.json";
 pub struct Settings {
     /// TMDB API key. Kept only in the settings file on this computer.
     pub api_key: String,
+    /// A Movie Match server's address (e.g. `http://127.0.0.1:8765`). When set, the
+    /// app asks it instead of TMDB and needs no key. Empty to use the key.
+    pub server_url: String,
     /// Pages of upcoming releases (today or later) to rate (20 movies per page).
     pub upcoming_pages: u32,
     /// Two-letter country code: Upcoming lists only movies with a cinema release
@@ -40,6 +43,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             api_key: String::new(),
+            server_url: String::new(),
             upcoming_pages: 2,
             upcoming_region: sys_locale::get_locale()
                 .and_then(|locale| Region::from_locale(&locale))

@@ -1,0 +1,6 @@
+[package]
+name = "xtask"
+version = "0.1.0"
+edition = "2021"
+description = "Developer tasks, run as `cargo dev` (see .cargo/config.toml)."
+publish = false
