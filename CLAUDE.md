@@ -13,20 +13,30 @@ movies the user likes. See README.md for the roadmap.
   disliked <= 4 only label explanations)
 - `src/features.rs` `MovieDetails` -> field-weighted tokens (`FieldWeights`) and labels
 - `src/tfidf.rs`  `Idf` table, unit-length `Vector`, cosine similarity
-- `src/scoring.rs` `score(profile, movie) -> u8` (0-100): predicted rating × 10 from the
-  movie's 20 most similar rated movies (`predict`: weight = (similarity / closest)^2
+- `src/scoring.rs` scores (0-100) = predicted rating × 10, blended as `share × released +
+  (1 − share) × unreleased`, `share = votes / (votes + 100)` (`blend`,
+  `AUDIENCE_VOTES_HALF`). Released: audience score + `AudienceShift` prediction.
+  Unreleased: the similarity rating + `TRACK_RECORD_NUDGE` × (track-record estimate −
+  typical) (`nudged`). `Signals` carries the shift and `TrackRecords`; the `_with`
+  functions take them, the plain ones use similarity alone. The similarity rating
+  comes from the movie's 20 most similar rated movies (`predict`: weight = (similarity / closest)^2
   (`SIMILARITY_POWER`), whatever the rating; movies tied for the 20th place are all kept and
   split the places left, so file order never matters; the weighted average is blended with the overall
   average as (n x weighted + 5 x overall) / (n + 5) for n neighbours
   (`OVERALL_SHRINK`), so exactly the overall average with none). `score_detailed` (with
   reasons), `explain` (for `--explain`), `rank`. Pure.
+- `src/shift.rs`  `AudienceShift`: the user's average difference from the audience plus a
+  ridge-fitted shift per feature (`RIDGE`, light). Pure.
 - `src/cache.rs`  `DiskCache`: JSON files with expiry under `data/cache/` (gitignored).
   Callers save with `put_or_warn`: a failed cache write is a warning, not an error
 - `src/fetch.rs`  `Fetcher`: TMDB client + cached movie details, keyed by
   `details_cache_key` (use it in tests, never a literal key). `details` fails on any
   failed id; `available_details` (used by the catalog) skips only ids TMDB answers
   404 for (`tmdb::is_not_found`), with one summary warning, and fails on other errors;
-  `details_if_found` gives `None` per 404 and also fails on other errors
+  `details_if_found` gives `None` per 404 and also fails on other errors;
+  `filmographies` fails on non-404 errors (evaluation tools), `filmographies_or_skip`
+  (ranking's track records) gives `None` for any failure, warns once, and stops asking
+  TMDB after `MAX_FILMOGRAPHY_FAILURES`
 - `src/dates.rs`  `Date`: `YYYY-MM-DD` calendar maths (unix days, months earlier). Pure.
 - `src/catalog.rs` `Catalog`: shared movies and IDF, same for every user. Upcoming is
   first released today (local date) or later, optionally only films with a cinema
@@ -36,7 +46,8 @@ movies the user likes. See README.md for the roadmap.
   ids, and a list from another day is a miss, so each option set keeps one file
 - `src/recommend.rs` per-user steps: `resolve` ratings to TMDB (`Resolved::ids` per input,
   in order; a given id TMDB answers 404 for becomes unmatched with id `None`, so one
-  stale id can't fail every run), `rank_upcoming`, `explain_movie`. Futures must stay `Send` (the app runs them
+  stale id can't fail every run), `rank_upcoming` and `explain_movie` (both fit the
+  `AudienceShift` and fetch the catalog's track records, cached a month). Futures must stay `Send` (the app runs them
   on a multi-threaded runtime): stream over owned items, not references.
 - I/O lives only in `tmdb/`, `cache.rs`, `fetch.rs`, `catalog.rs`, `recommend.rs`.
 - `src/tmdb/`     TMDB API client (`mod.rs`) and response types (`models.rs`)

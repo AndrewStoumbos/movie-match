@@ -4,7 +4,16 @@ use common::{filler_dramas, movie, rated, Spec, COMEDY, HORROR};
 use movie_match::evaluate::{leave_one_out, spearman, METHODS};
 use movie_match::features::{self, FieldWeights};
 use movie_match::profile::RatedDetails;
+use movie_match::scoring::TrackRecords;
 use movie_match::tfidf::Idf;
+
+/// Where `name` sits in [`METHODS`].
+fn method(name: &str) -> usize {
+    METHODS
+        .iter()
+        .position(|&m| m == name)
+        .unwrap_or_else(|| panic!("no method {name}"))
+}
 
 #[test]
 fn spearman_measures_how_well_the_order_matches() {
@@ -66,10 +75,14 @@ fn similar_ratings_beat_the_average_when_taste_follows_similarity() {
 
     assert_eq!(evaluation.movies.len(), 12);
     assert_eq!(evaluation.results.len(), METHODS.len());
-    let [movie_match, average, closest, tmdb, ..] = evaluation.results.as_slice() else {
+    let [movie_match, similarity, average, closest, tmdb, ..] = evaluation.results.as_slice()
+    else {
         panic!("one result per method");
     };
     assert_eq!(movie_match.name, "movie-match");
+    // Without audience votes or track records, movie-match is similarity alone.
+    assert_eq!(similarity.name, "similarity only");
+    assert_eq!(movie_match.mae, similarity.mae);
     // Every hidden movie has a twin rated the same, so following similar ratings
     // wins clearly over guessing the average.
     assert!(
@@ -98,7 +111,7 @@ fn tmdb_baseline_only_counts_movies_with_votes() {
         &idf_for(&rated_movies),
         FieldWeights::default(),
     );
-    let tmdb = &evaluation.results[3];
+    let tmdb = &evaluation.results[method("TMDB audience score")];
     assert_eq!(tmdb.count, 1);
     // Rated 9, TMDB says 8.
     assert!((tmdb.mae - 1.0).abs() < 1e-6);
@@ -130,9 +143,14 @@ fn a_steady_difference_from_the_audience_is_predicted_exactly() {
         &idf_for(&rated_movies),
         FieldWeights::default(),
     );
-    let [_, _, _, tmdb, rest @ ..] = evaluation.results.as_slice() else {
+    let [movie_match, similarity, _, _, tmdb, rest @ ..] = evaluation.results.as_slice() else {
         panic!("one result per method");
     };
+    // With 500 votes, movie-match is mostly the exact audience + shift prediction.
+    assert!(
+        movie_match.mae < similarity.mae,
+        "{movie_match:?} vs {similarity:?}"
+    );
     // Average diff, similar diff and all three shift strengths; then the
     // "est. quality" ones, which predict nothing without estimates.
     let (diffs, estimated) = rest.split_at(5);
@@ -154,10 +172,13 @@ fn estimated_quality_matching_the_audience_gives_the_audience_results() {
         r.movie.vote_average = Some(r.rating - 1.0);
         r.movie.vote_count = Some(500);
     }
-    let estimates: std::collections::HashMap<u64, f32> = rated_movies
-        .iter()
-        .map(|r| (r.movie.id, r.rating - 1.0))
-        .collect();
+    let estimates = TrackRecords {
+        typical: 5.5,
+        estimates: rated_movies
+            .iter()
+            .map(|r| (r.movie.id, r.rating - 1.0))
+            .collect(),
+    };
 
     let evaluation = movie_match::evaluate::leave_one_out_with_quality(
         &rated_movies,
@@ -246,8 +267,9 @@ fn across_users_groups_people_by_how_closely_they_follow_the_crowd() {
     assert!(crowd.agreement.0 > 0.9, "{crowd:?}");
     assert!(contrarian.agreement.1 < -0.9, "{contrarian:?}");
     // The raw audience score is spot on for the agreeing user, way off for the other.
-    assert!(crowd.mae[3] < 1e-5);
-    assert!(contrarian.mae[3] > 3.0);
+    let audience = method("TMDB audience score");
+    assert!(crowd.mae[audience] < 1e-5);
+    assert!(contrarian.mae[audience] > 3.0);
 }
 
 #[test]
@@ -255,8 +277,10 @@ fn nudge_tuning_picks_a_strength_and_scores_it_on_unseen_users() {
     // Estimates that track the user's ratings perfectly, for four users: tuning
     // should nudge, and nudging should help on the users it didn't tune on.
     let users: Vec<_> = (0..4).map(|_| paired_ratings()).collect();
-    let estimates: std::collections::HashMap<u64, f32> =
-        users[0].iter().map(|r| (r.movie.id, r.rating)).collect();
+    let estimates = TrackRecords {
+        typical: 5.5,
+        estimates: users[0].iter().map(|r| (r.movie.id, r.rating)).collect(),
+    };
     let idf = idf_for(&users[0]);
     let evaluations = movie_match::evaluate::leave_one_out_each(
         &users,

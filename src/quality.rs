@@ -26,6 +26,9 @@ pub const PERSON_SHRINK: f32 = 0.0;
 /// director counts 3). 0: the estimate is the track records' weighted average alone.
 pub const ESTIMATE_SHRINK: f32 = 0.0;
 
+/// How many top-billed actors' records count toward a film's estimate when scoring.
+pub const TRACK_RECORD_CAST: usize = 3;
+
 /// Films need at least this many votes to count toward the typical score.
 pub const TYPICAL_MIN_VOTES: u32 = 100;
 

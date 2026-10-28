@@ -1,5 +1,7 @@
 //! TMDB access with an optional disk cache in front of movie details.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -17,6 +19,10 @@ pub const DETAILS_MAX_AGE: Duration = Duration::from_secs(3 * 24 * 60 * 60);
 
 /// How long a person's cached filmography is reused. Only new releases change it.
 pub const FILMOGRAPHY_MAX_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
+/// How many failed filmography requests [`Fetcher::filmographies_or_skip`] allows
+/// before it stops asking TMDB.
+pub const MAX_FILMOGRAPHY_FAILURES: usize = 20;
 
 pub struct Fetcher {
     client: TmdbClient,
@@ -140,9 +146,68 @@ impl Fetcher {
             .await
     }
 
+    /// Like [`Self::filmographies`], but a person whose films fail to load for any
+    /// reason (a rate limit, timeout or server error as well as a 404) is `None`
+    /// instead of failing the call, with one summary warning on stderr. For callers
+    /// where missing films only make an estimate less informed. After
+    /// [`MAX_FILMOGRAPHY_FAILURES`] failures it stops asking TMDB and only uses the
+    /// cache, so a broken connection can't send hundreds of doomed requests.
+    pub async fn filmographies_or_skip(&self, people: &[u64]) -> Vec<Option<Vec<CreditedFilm>>> {
+        let failures = AtomicUsize::new(0);
+        let first_error = Mutex::new(None);
+        let failures = &failures;
+        let first_error = &first_error;
+        // Owned ids keep the futures `Send` (see `recommend::resolve`).
+        let found: Vec<_> = stream::iter(people.to_vec())
+            .map(|id| async move {
+                if failures.load(Ordering::Relaxed) >= MAX_FILMOGRAPHY_FAILURES {
+                    return self.cached_filmography(id);
+                }
+                match self.one_filmography(id).await {
+                    Ok(films) => Some(films),
+                    Err(err) => {
+                        if !tmdb::is_not_found(&err) {
+                            failures.fetch_add(1, Ordering::Relaxed);
+                            if let Ok(mut first) = first_error.lock() {
+                                first.get_or_insert(format!("{err:#}"));
+                            }
+                        }
+                        None
+                    }
+                }
+            })
+            .buffered(CONCURRENT_REQUESTS)
+            .collect()
+            .await;
+        let failed = failures.load(Ordering::Relaxed);
+        if failed > 0 {
+            let first = first_error
+                .lock()
+                .ok()
+                .and_then(|mut first| first.take())
+                .unwrap_or_default();
+            let stopped = if failed >= MAX_FILMOGRAPHY_FAILURES {
+                ", so stopped asking TMDB and used only cached ones"
+            } else {
+                ""
+            };
+            eprintln!(
+                "warning: couldn't fetch films for {failed} of {} people{stopped}; their track \
+                 records are left out ({first})",
+                people.len()
+            );
+        }
+        found
+    }
+
+    fn cached_filmography(&self, person: u64) -> Option<Vec<CreditedFilm>> {
+        let key = filmography_cache_key(person);
+        self.cache().and_then(|c| c.get(&key, FILMOGRAPHY_MAX_AGE))
+    }
+
     async fn one_filmography(&self, person: u64) -> Result<Vec<CreditedFilm>> {
         let key = filmography_cache_key(person);
-        if let Some(films) = self.cache().and_then(|c| c.get(&key, FILMOGRAPHY_MAX_AGE)) {
+        if let Some(films) = self.cached_filmography(person) {
             return Ok(films);
         }
         let films = self

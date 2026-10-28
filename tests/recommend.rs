@@ -5,16 +5,21 @@ mod common;
 use std::fs;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use common::tmdb::{local_client, serve_once, serve_once_recording, serve_with};
 use common::{movie, Spec};
 use movie_match::cache::DiskCache;
 use movie_match::catalog::{catalog_cache_key, today, ReleaseWindows};
-use movie_match::fetch::{details_cache_key, Fetcher};
+use movie_match::fetch::{
+    details_cache_key, filmography_cache_key, Fetcher, CONCURRENT_REQUESTS,
+    MAX_FILMOGRAPHY_FAILURES,
+};
 use movie_match::profile::RatedMovie;
-use movie_match::recommend::{explain_movie, resolve, Options, Resolved};
-use movie_match::tmdb::MovieDetails;
+use movie_match::recommend::{explain_movie, rank_upcoming, resolve, Options, Resolved};
+use movie_match::tmdb::{CreditedFilm, MovieDetails};
 
 /// A fresh, empty folder for one test.
 fn temp_dir(name: &str) -> PathBuf {
@@ -265,5 +270,78 @@ async fn ids_line_up_with_the_inputs_one_to_one() {
     assert_eq!(
         resolved.unmatched,
         ["Missing", "untitled entry", "Also missing", "Gone"]
+    );
+}
+
+const SERVER_ERROR: &str = "HTTP/1.1 500 Internal Server Error
+Content-Length: 0
+Connection: close
+
+";
+
+#[tokio::test]
+async fn a_failed_filmography_leaves_that_track_record_out_instead_of_failing() {
+    let dir = temp_dir("filmography-500");
+    // Directed by 7, whose films are cached, and 8, whose request fails.
+    let upcoming = movie(
+        "Upcoming",
+        Spec {
+            id: 438631,
+            directors: vec![7, 8],
+            ..Spec::default()
+        },
+    );
+    let cache = cache_with_upcoming(&dir, std::slice::from_ref(&upcoming));
+    let earlier = CreditedFilm {
+        id: 1,
+        release_date: Some("2000-01-01".into()),
+        vote_average: Some(8.0),
+        vote_count: Some(1000),
+    };
+    cache
+        .put(&filmography_cache_key(7), &vec![earlier])
+        .expect("write filmography");
+    let fetcher = Fetcher::new(
+        local_client(serve_with(|_| SERVER_ERROR.to_string())),
+        Some(cache),
+    );
+
+    let ranking = rank_upcoming(&fetcher, &[], &Options::default()).await;
+    let _ = fs::remove_dir_all(&dir);
+
+    let ranking = ranking.expect("a 500 for one person doesn't fail the ranking");
+    let [ranked] = ranking.ranked.as_slice() else {
+        panic!("the one upcoming movie");
+    };
+    // Scored from director 7's record alone.
+    let track_record = ranked.breakdown.track_record.as_ref().expect("director 7");
+    assert!(
+        (track_record.estimate - 8.0).abs() < 1e-4,
+        "{track_record:?}"
+    );
+}
+
+#[tokio::test]
+async fn filmography_requests_stop_after_repeated_failures() {
+    let dir = temp_dir("filmography-cap");
+    let requests = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&requests);
+    let base = serve_with(move |_| {
+        counted.fetch_add(1, Ordering::SeqCst);
+        SERVER_ERROR.to_string()
+    });
+    let fetcher = Fetcher::new(local_client(base), Some(DiskCache::new(&dir)));
+    let people: Vec<u64> = (1..=60).collect();
+
+    let found = fetcher.filmographies_or_skip(&people).await;
+    let _ = fs::remove_dir_all(&dir);
+
+    assert_eq!(found.len(), people.len());
+    assert!(found.iter().all(Option::is_none));
+    // Only requests already under way when the limit was hit go past it.
+    let made = requests.load(Ordering::SeqCst);
+    assert!(
+        made < MAX_FILMOGRAPHY_FAILURES + CONCURRENT_REQUESTS,
+        "{made} requests"
     );
 }

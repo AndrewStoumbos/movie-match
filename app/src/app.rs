@@ -1119,9 +1119,35 @@ fn explanation_view(ui: &mut egui::Ui, movie: &MovieDetails, explanation: &Expla
     });
     ui.add_space(10.0);
     section(ui, "How the score was predicted", |ui| {
+        let breakdown = &explanation.breakdown;
+        let share = breakdown.audience_share * 100.0;
+        if let Some(audience) = &breakdown.audience {
+            ui.label(format!(
+                "{share:.0}% from the TMDB audience: {:.1}/10 from {} votes, {:+.1} for how you \
+                 usually differ from it, so {:.1}.",
+                audience.score,
+                thousands(audience.votes),
+                audience.shift.total(),
+                audience.rating
+            ));
+        }
+        let nudge = breakdown.track_record.as_ref().map_or(String::new(), |t| {
+            format!(
+                ", {:+.1} for its cast and crew's earlier films ({:.1} vs a typical {:.1})",
+                t.nudge, t.estimate, t.typical
+            )
+        });
+        ui.label(format!(
+            "{:.0}% from movies you've rated: similarity rating {:.1}{nudge}, so {:.1}.",
+            100.0 - share,
+            breakdown.similarity,
+            breakdown.unreleased
+        ));
+        ui.add_space(4.0);
         if explanation.neighbours.is_empty() {
             ui.label(format!(
-                "Nothing you've rated is similar, so the score is your overall average ({:.1}/10).",
+                "Nothing you've rated is similar, so the similarity rating is your overall \
+                 average ({:.1}/10).",
                 explanation.mean_rating
             ));
         } else {
@@ -1132,8 +1158,8 @@ fn explanation_view(ui: &mut egui::Ui, movie: &MovieDetails, explanation: &Expla
                 explanation.neighbour_rating
             ));
             ui.label(format!(
-                "Your overall average ({:.1}/10) makes up {:.0}% of the score; it counts \
-                 more when few movies are similar.",
+                "Your overall average ({:.1}/10) makes up {:.0}% of the similarity rating; it \
+                 counts more when few movies are similar.",
                 explanation.mean_rating,
                 explanation.overall_share * 100.0
             ));

@@ -1,13 +1,22 @@
 //! Scores candidate movies against a taste profile.
 //!
-//! A candidate's score is a predicted rating: an average of the user's ratings for
-//! the rated movies most similar to it (its "neighbours"), chosen by similarity
-//! alone, whatever the user rated them. Closer neighbours count more (by similarity
-//! squared), and the average leans toward the user's overall average only when
-//! there are few neighbours.
+//! A candidate's score is a predicted rating, from two formulas blended by how many
+//! TMDB audience votes the film has (see [`blend`]):
+//!
+//! - **Unreleased** (no votes yet): the similarity rating, an average of the user's
+//!   ratings for the rated movies most similar to it (its "neighbours"), chosen by
+//!   similarity alone, whatever the user rated them. Closer neighbours count more
+//!   (by similarity squared), and the average leans toward the user's overall
+//!   average only when there are few neighbours. Then nudged by how far its cast and
+//!   crew's track record sits from the typical film's ([`TRACK_RECORD_NUDGE`]).
+//! - **Released**: the audience score plus the user's usual difference from the
+//!   audience for films like it ([`AudienceShift`]).
+
+use std::collections::HashMap;
 
 use crate::features;
 use crate::profile::{RatedVector, TasteProfile};
+use crate::shift::{AudienceShift, ShiftPrediction};
 use crate::tfidf::Vector;
 use crate::tmdb::MovieDetails;
 
@@ -29,6 +38,142 @@ pub const OVERALL_SHRINK: f32 = 5.0;
 /// How many shared features [`Match::reasons`] lists.
 const MAX_REASONS: usize = 3;
 
+/// Audience votes at which a film's score is half the released formula and half
+/// the unreleased one: the released formula's share is `votes / (votes +
+/// AUDIENCE_VOTES_HALF)`, so a festival film with 10 votes is still mostly the
+/// unreleased formula and one with 5,000 is almost all the released one.
+pub const AUDIENCE_VOTES_HALF: f32 = 100.0;
+
+/// How far a film's track record moves its unreleased score: by `TRACK_RECORD_NUDGE ×
+/// (estimate − typical)` rating points. 1.0 predicted best of the strengths tried
+/// on MovieLens users that tuning never saw.
+pub const TRACK_RECORD_NUDGE: f32 = 1.0;
+
+/// What scoring can use beyond the user's ratings. Without either part (the
+/// default), every film gets its similarity rating alone.
+#[derive(Debug, Clone, Default)]
+pub struct Signals {
+    /// The user's difference from the audience; `None` when none of their rated
+    /// movies has audience votes, and then the released formula isn't used.
+    pub shift: Option<AudienceShift>,
+    /// Cast and crew track records for the candidates.
+    pub track_records: Option<TrackRecords>,
+}
+
+/// Estimated audience scores from cast and crew track records (see
+/// [`crate::quality::estimate`]).
+#[derive(Debug, Clone, Default)]
+pub struct TrackRecords {
+    /// What a film is expected to score knowing nothing else.
+    pub typical: f32,
+    /// Estimates per TMDB id. A film without one isn't nudged.
+    pub estimates: HashMap<u64, f32>,
+}
+
+/// How a film's score was put together.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Breakdown {
+    /// The similarity rating, 0 to 10 (see [`predict`]).
+    pub similarity: f32,
+    /// The track-record nudge, when the film has an estimate.
+    pub track_record: Option<TrackRecordNudge>,
+    /// The unreleased formula: `similarity` plus the nudge, 0 to 10.
+    pub unreleased: f32,
+    /// The released formula, when the film has audience votes and the user a shift.
+    pub audience: Option<AudienceView>,
+    /// How much of `rating` is the released formula, 0 to 1 (see [`blend`]).
+    pub audience_share: f32,
+    /// The predicted rating, 0 to 10.
+    pub rating: f32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrackRecordNudge {
+    /// The film's estimated audience score from its cast and crew's earlier films.
+    pub estimate: f32,
+    pub typical: f32,
+    /// What the nudge adds: `TRACK_RECORD_NUDGE × (estimate − typical)`.
+    pub nudge: f32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AudienceView {
+    /// TMDB audience score, 0 to 10.
+    pub score: f32,
+    pub votes: u32,
+    /// The user's predicted difference from that score.
+    pub shift: ShiftPrediction,
+    /// `score + shift`, 0 to 10.
+    pub rating: f32,
+}
+
+/// The released formula's share of a film's score: `votes / (votes + AUDIENCE_VOTES_HALF)`.
+pub fn audience_share(votes: u32) -> f32 {
+    let votes = votes as f32;
+    votes / (votes + AUDIENCE_VOTES_HALF)
+}
+
+/// The two formulas blended: `share × released + (1 − share) × unreleased`, with
+/// `share` from [`audience_share`], or just `unreleased` without a released rating.
+/// Returns the rating and the share.
+pub fn blend(unreleased: f32, released: Option<f32>, votes: u32) -> (f32, f32) {
+    match released {
+        Some(released) => {
+            let share = audience_share(votes);
+            (share * released + (1.0 - share) * unreleased, share)
+        }
+        None => (unreleased, 0.0),
+    }
+}
+
+/// `similarity` nudged by a track-record estimate, 0 to 10.
+pub fn nudged(similarity: f32, estimate: Option<f32>, typical: f32) -> f32 {
+    let nudge = estimate.map_or(0.0, |e| TRACK_RECORD_NUDGE * (e - typical));
+    (similarity + nudge).clamp(0.0, 10.0)
+}
+
+/// Puts `movie`'s score together from its similarity rating and `signals`.
+pub fn breakdown(similarity: f32, movie: &MovieDetails, signals: &Signals) -> Breakdown {
+    let track_record = signals.track_records.as_ref().and_then(|records| {
+        let estimate = *records.estimates.get(&movie.id)?;
+        Some(TrackRecordNudge {
+            estimate,
+            typical: records.typical,
+            nudge: TRACK_RECORD_NUDGE * (estimate - records.typical),
+        })
+    });
+    let unreleased = nudged(
+        similarity,
+        track_record.as_ref().map(|t| t.estimate),
+        track_record.as_ref().map_or(0.0, |t| t.typical),
+    );
+    let audience = match (&signals.shift, movie.audience_rating()) {
+        (Some(shift), Some(score)) => {
+            let shift = shift.predict(movie);
+            Some(AudienceView {
+                score,
+                votes: movie.vote_count.unwrap_or(0),
+                rating: (score + shift.total()).clamp(0.0, 10.0),
+                shift,
+            })
+        }
+        _ => None,
+    };
+    let (rating, audience_share) = blend(
+        unreleased,
+        audience.as_ref().map(|a| a.rating),
+        audience.as_ref().map_or(0, |a| a.votes),
+    );
+    Breakdown {
+        similarity,
+        track_record,
+        unreleased,
+        audience,
+        audience_share,
+        rating,
+    }
+}
+
 /// A candidate's score and why it got it.
 #[derive(Debug, Clone)]
 pub struct Match<'a> {
@@ -41,9 +186,11 @@ pub struct Match<'a> {
     pub closest_disliked: Option<&'a RatedVector>,
     /// Features shared with `closest_liked`, strongest first, e.g. `director Denis Villeneuve`.
     pub reasons: Vec<String>,
+    pub breakdown: Breakdown,
 }
 
-/// How likely the user is to enjoy `movie`, from 0 (unlikely) to 100 (very likely).
+/// How likely the user is to enjoy `movie`, from 0 (unlikely) to 100 (very likely),
+/// from similarity alone.
 pub fn score(profile: &TasteProfile, movie: &MovieDetails) -> u8 {
     score_detailed(profile, movie).score
 }
@@ -149,7 +296,16 @@ pub fn predict<'a>(profile: &'a TasteProfile, candidate: &Vector) -> Prediction<
     }
 }
 
+/// [`score_detailed_with`] from similarity alone.
 pub fn score_detailed<'a>(profile: &'a TasteProfile, movie: &MovieDetails) -> Match<'a> {
+    score_detailed_with(profile, &Signals::default(), movie)
+}
+
+pub fn score_detailed_with<'a>(
+    profile: &'a TasteProfile,
+    signals: &Signals,
+    movie: &MovieDetails,
+) -> Match<'a> {
     let candidate = profile.vectorize(movie);
     let prediction = predict(profile, &candidate);
 
@@ -160,11 +316,13 @@ pub fn score_detailed<'a>(profile: &'a TasteProfile, movie: &MovieDetails) -> Ma
         Some(liked) => reasons(profile, movie, &candidate, &liked.vector),
         None => Vec::new(),
     };
+    let breakdown = breakdown(prediction.rating, movie, signals);
     Match {
-        score: to_score(prediction.rating),
+        score: to_score(breakdown.rating),
         closest_liked,
         closest_disliked,
         reasons,
+        breakdown,
     }
 }
 
@@ -173,6 +331,8 @@ pub fn score_detailed<'a>(profile: &'a TasteProfile, movie: &MovieDetails) -> Ma
 pub struct Explanation {
     pub score: u8,
     pub predicted_rating: f32,
+    /// How the similarity rating, track record and audience combine.
+    pub breakdown: Breakdown,
     /// The user's overall average rating.
     pub mean_rating: f32,
     /// The neighbours' ratings averaged by weight (see [`Prediction::neighbour_rating`]).
@@ -193,7 +353,16 @@ pub struct ExplainedNeighbour {
     pub shared: Vec<String>,
 }
 
+/// [`explain_with`] from similarity alone.
 pub fn explain(profile: &TasteProfile, movie: &MovieDetails) -> Explanation {
+    explain_with(profile, &Signals::default(), movie)
+}
+
+pub fn explain_with(
+    profile: &TasteProfile,
+    signals: &Signals,
+    movie: &MovieDetails,
+) -> Explanation {
     let candidate = profile.vectorize(movie);
     let prediction = predict(profile, &candidate);
     let labels = features::labels(movie, profile.weights());
@@ -212,9 +381,11 @@ pub fn explain(profile: &TasteProfile, movie: &MovieDetails) -> Explanation {
                 .collect(),
         })
         .collect();
+    let breakdown = breakdown(prediction.rating, movie, signals);
     Explanation {
-        score: to_score(prediction.rating),
-        predicted_rating: prediction.rating,
+        score: to_score(breakdown.rating),
+        predicted_rating: breakdown.rating,
+        breakdown,
         mean_rating: profile.mean_rating(),
         neighbour_rating: prediction.neighbour_rating,
         overall_share: prediction.overall_share,
@@ -236,23 +407,34 @@ pub struct Ranked {
     /// Title and rating of the closest disliked movie.
     pub closest_disliked: Option<(String, f32)>,
     pub reasons: Vec<String>,
+    pub breakdown: Breakdown,
+}
+
+/// [`rank_with`] from similarity alone.
+pub fn rank(profile: &TasteProfile, candidates: &[MovieDetails]) -> Vec<Ranked> {
+    rank_with(profile, &Signals::default(), candidates)
 }
 
 /// Scores every candidate the user hasn't already rated, best match first
 /// (ties broken by title).
-pub fn rank(profile: &TasteProfile, candidates: &[MovieDetails]) -> Vec<Ranked> {
+pub fn rank_with(
+    profile: &TasteProfile,
+    signals: &Signals,
+    candidates: &[MovieDetails],
+) -> Vec<Ranked> {
     let summary = |r: &RatedVector| (r.title.clone(), r.rating);
     let mut ranked: Vec<Ranked> = candidates
         .iter()
         .filter(|movie| !profile.has_rated(movie.id))
         .map(|movie| {
-            let found = score_detailed(profile, movie);
+            let found = score_detailed_with(profile, signals, movie);
             Ranked {
                 movie: movie.clone(),
                 score: found.score,
                 closest_liked: found.closest_liked.map(summary),
                 closest_disliked: found.closest_disliked.map(summary),
                 reasons: found.reasons,
+                breakdown: found.breakdown,
             }
         })
         .collect();

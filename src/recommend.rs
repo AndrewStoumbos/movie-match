@@ -12,8 +12,9 @@ use crate::features::{self, FieldWeights};
 use crate::fetch::{Fetcher, CONCURRENT_REQUESTS};
 use crate::movielens::UserRatings;
 use crate::profile::{RatedDetails, RatedMovie, TasteProfile};
-use crate::quality;
-use crate::scoring::{self, Explanation, Ranked};
+use crate::quality::{self, TRACK_RECORD_CAST};
+use crate::scoring::{self, Explanation, Ranked, Signals, TrackRecords};
+use crate::shift::AudienceShift;
 use crate::tfidf::Idf;
 use crate::tmdb::{CreditedFilm, MovieDetails};
 
@@ -49,7 +50,9 @@ pub struct Ranking {
     pub recent: Vec<Ranked>,
 }
 
-/// Ranks the catalog's upcoming and recent releases for one user.
+/// Ranks the catalog's upcoming and recent releases for one user (see
+/// [`scoring::rank_with`]), with their difference from the audience and the
+/// candidates' cast and crew track records.
 pub async fn rank_upcoming(
     fetcher: &Fetcher,
     movies: &[RatedMovie],
@@ -62,8 +65,10 @@ pub async fn rank_upcoming(
         catalog.idf(&options.weights),
         options.weights,
     );
-    let ranked = scoring::rank(&profile, &catalog.upcoming);
-    let recent = scoring::rank(&profile, &catalog.recent);
+    let candidates: Vec<&MovieDetails> = catalog.upcoming.iter().chain(&catalog.recent).collect();
+    let signals = signals(fetcher, &resolved, &candidates, options.weights).await?;
+    let ranked = scoring::rank_with(&profile, &signals, &catalog.upcoming);
+    let recent = scoring::rank_with(&profile, &signals, &catalog.recent);
     Ok(Ranking {
         resolved,
         ranked,
@@ -156,7 +161,7 @@ pub async fn evaluate_movielens(
 
     let mut people_needed = None;
     let mut typical_quality = None;
-    let estimates: Option<HashMap<u64, f32>> = match quality_cast {
+    let estimates: Option<TrackRecords> = match quality_cast {
         None => None,
         Some(cast_limit) => {
             let people: Vec<u64> = details
@@ -173,15 +178,16 @@ pub async fn evaluate_movielens(
                 .filter_map(|(person, films)| Some((*person, films?)))
                 .collect();
             typical_quality = quality::typical_score(&filmographies);
-            typical_quality.map(|typical| {
-                details
+            typical_quality.map(|typical| TrackRecords {
+                typical,
+                estimates: details
                     .values()
                     .map(|movie| {
                         let credits = quality::credits(movie, &weights, cast_limit);
                         let found = quality::estimate(movie, &credits, &filmographies, typical);
                         (movie.id, found.unwrap_or(typical))
                     })
-                    .collect()
+                    .collect(),
             })
         }
     };
@@ -286,8 +292,74 @@ pub async fn explain_movie(
         catalog.idf(&options.weights),
         options.weights,
     );
-    let explanation = scoring::explain(&profile, &movie);
+    // The typical score comes from the whole catalog's track records, as when
+    // ranking, so a catalog movie is explained with the score it's listed with.
+    let candidates: Vec<&MovieDetails> = catalog
+        .upcoming
+        .iter()
+        .chain(&catalog.recent)
+        .chain([&movie])
+        .collect();
+    let signals = signals(fetcher, &resolved, &candidates, options.weights).await?;
+    let explanation = scoring::explain_with(&profile, &signals, &movie);
     Ok(Some((movie, explanation)))
+}
+
+/// What scoring uses beyond similarity: the user's [`AudienceShift`] and the
+/// `candidates`' track records (see [`track_records`]).
+async fn signals(
+    fetcher: &Fetcher,
+    resolved: &Resolved,
+    candidates: &[&MovieDetails],
+    weights: FieldWeights,
+) -> Result<Signals> {
+    Ok(Signals {
+        shift: AudienceShift::fit(&resolved.rated, weights),
+        track_records: track_records(fetcher, candidates, &weights).await?,
+    })
+}
+
+/// Each of `movies`' estimated audience score from its directors', writers' and
+/// top [`TRACK_RECORD_CAST`] actors' earlier films (see [`quality::estimate`]),
+/// fetching their filmographies (cached for a month). A person whose films fail to
+/// load is left out (see [`Fetcher::filmographies_or_skip`]). The typical score
+/// comes from those same filmographies. `None` when none of their films has enough
+/// votes to set it.
+async fn track_records(
+    fetcher: &Fetcher,
+    movies: &[&MovieDetails],
+    weights: &FieldWeights,
+) -> Result<Option<TrackRecords>> {
+    let credits: Vec<Vec<quality::Credit>> = movies
+        .iter()
+        .map(|movie| quality::credits(movie, weights, TRACK_RECORD_CAST))
+        .collect();
+    let people: Vec<u64> = credits
+        .iter()
+        .flatten()
+        .map(|credit| credit.person)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    // Track records only nudge a score, so a person whose films don't load is left
+    // out (with a warning) rather than failing the ranking.
+    let filmographies: HashMap<u64, Vec<CreditedFilm>> = people
+        .iter()
+        .zip(fetcher.filmographies_or_skip(&people).await)
+        .filter_map(|(person, films)| Some((*person, films?)))
+        .collect();
+    let Some(typical) = quality::typical_score(&filmographies) else {
+        return Ok(None);
+    };
+    let estimates = movies
+        .iter()
+        .zip(&credits)
+        .filter_map(|(movie, credits)| {
+            let estimate = quality::estimate(movie, credits, &filmographies, typical)?;
+            Some((movie.id, estimate))
+        })
+        .collect();
+    Ok(Some(TrackRecords { typical, estimates }))
 }
 
 /// Matches each rated movie to TMDB (by id, or else by title search) and fetches
