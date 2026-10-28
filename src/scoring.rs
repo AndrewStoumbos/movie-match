@@ -26,11 +26,6 @@ pub const SIMILARITY_POWER: i32 = 2;
 /// one neighbour it's most of it, so a single overlap can't decide a score.
 pub const OVERALL_SHRINK: f32 = 5.0;
 
-/// Weight multiplier for neighbours among the user's low ratings (their bottom
-/// 40%, see [`TasteProfile::is_low_rating`]), so a low rating moves a prediction 30%
-/// less than an equally similar higher one.
-pub const LOW_RATING_IMPACT: f32 = 0.7;
-
 /// How many shared features [`Match::reasons`] lists.
 const MAX_REASONS: usize = 3;
 
@@ -59,9 +54,8 @@ pub struct Neighbour<'a> {
     pub rated: &'a RatedVector,
     /// Cosine similarity to the candidate, 0.0 to 1.0.
     pub similarity: f32,
-    /// `(similarity / closest similarity) ^ SIMILARITY_POWER`, times
-    /// [`LOW_RATING_IMPACT`] for low ratings. The closest counts 1.0 (0.7 if a low
-    /// rating); one half as similar counts 0.25. Movies tied for the last of the
+    /// `(similarity / closest similarity) ^ SIMILARITY_POWER`: the closest counts
+    /// 1.0, one half as similar counts 0.25. Movies tied for the last of the
     /// [`NEIGHBOURS`] places split the places left: 30 tied for 10 places count a
     /// third each.
     pub weight: f32,
@@ -96,8 +90,7 @@ pub struct Prediction<'a> {
 /// only with few neighbours does it lean on the overall average, and with none it's
 /// exactly that average. Weights are relative to the closest neighbour because raw
 /// similarities between different films are small (often under 0.1) and only their
-/// ratios matter. Weights of neighbours among the user's low ratings are multiplied
-/// by [`LOW_RATING_IMPACT`]. Movies tied for the last place are all kept and split
+/// ratios matter. Movies tied for the last place are all kept and split
 /// it, so the order of the ratings file never changes a prediction.
 pub fn predict<'a>(profile: &'a TasteProfile, candidate: &Vector) -> Prediction<'a> {
     if profile.rated().is_empty() {
@@ -132,16 +125,11 @@ pub fn predict<'a>(profile: &'a TasteProfile, candidate: &Vector) -> Prediction<
     let neighbours: Vec<Neighbour> = found
         .into_iter()
         .map(|(rated, similarity)| {
-            let impact = if profile.is_low_rating(rated.rating) {
-                LOW_RATING_IMPACT
-            } else {
-                1.0
-            };
             let share = if similarity == cutoff { tie_share } else { 1.0 };
             Neighbour {
                 rated,
                 similarity,
-                weight: (similarity / top).powi(SIMILARITY_POWER) * impact * share,
+                weight: (similarity / top).powi(SIMILARITY_POWER) * share,
             }
         })
         .collect();
@@ -192,8 +180,6 @@ pub struct Explanation {
     /// How much of the prediction is `mean_rating`, 0.0 to 1.0 (see
     /// [`Prediction::overall_share`]).
     pub overall_share: f32,
-    /// Ratings below this are the user's low ratings and count 30% less.
-    pub low_rating_cutoff: f32,
     pub neighbours: Vec<ExplainedNeighbour>,
 }
 
@@ -232,7 +218,6 @@ pub fn explain(profile: &TasteProfile, movie: &MovieDetails) -> Explanation {
         mean_rating: profile.mean_rating(),
         neighbour_rating: prediction.neighbour_rating,
         overall_share: prediction.overall_share,
-        low_rating_cutoff: profile.low_rating_cutoff(),
         neighbours,
     }
 }

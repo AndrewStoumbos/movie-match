@@ -105,10 +105,8 @@ Run the tests with `cargo test`.
    and a drama by your drama-like ones. Each neighbour's **weight** is its similarity
    divided by the closest one's, **squared**: the closest counts 1.0, one half as
    similar counts 0.25 (raw similarities between different films are tiny, often under
-   0.1, so only their ratios matter). Your **low ratings**, the bottom 40% of your own
-   ratings (strictly below the rating at the 40% mark, so ties don't count), count 30%
-   less than equally similar ones you rated higher. The line is relative to you: for a
-   generous rater it might be 8/10, for a harsh one 5/10. Rated movies tied for the
+   0.1, so only their ratios matter). A low rating counts as much as an equally similar
+   high one. Rated movies tied for the
    last of the 20 places (say 60 dramas a release shares only "Drama" with) are all
    kept and split the places left, so the order of your ratings file never matters.
 

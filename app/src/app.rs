@@ -1138,10 +1138,6 @@ fn explanation_view(ui: &mut egui::Ui, movie: &MovieDetails, explanation: &Expla
                 explanation.overall_share * 100.0
             ));
         }
-        ui.label(format!(
-            "Ratings below {}/10 (your bottom 40%) count 30% less.",
-            rating_text(explanation.low_rating_cutoff)
-        ));
     });
     section(ui, "Most similar movies you've rated", |ui| {
         if explanation.neighbours.is_empty() {

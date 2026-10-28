@@ -454,12 +454,8 @@ fn more_tied_faint_matches_than_neighbours_all_count_whatever_the_file_order() {
     assert!(first.similarity < 0.08, "faint: {}", first.similarity);
     let high = in_order.neighbours.iter().find(|n| n.rating == 9.0);
     assert!((high.map_or(0.0, |n| n.weight) - 1.0 / 3.0).abs() < 1e-5);
-    // Every drama counts equally (3 is at the low-rating cutoff, so not low), not
-    // just the first twenty 9s, which would predict (20 × 9 + 5 × 6) / 25 = 8.4.
-    assert!(!in_order
-        .neighbours
-        .iter()
-        .any(|n| n.rating < in_order.low_rating_cutoff));
+    // Every drama counts equally, not just the first twenty 9s, which would
+    // predict (20 × 9 + 5 × 6) / 25 = 8.4.
     assert!((in_order.neighbour_rating - 6.0).abs() < 1e-4);
     // Still counted as 20 neighbours for the overall average's share.
     assert!((in_order.overall_share - OVERALL_SHRINK / 25.0).abs() < 1e-6);
@@ -570,8 +566,7 @@ fn closer_neighbours_count_by_similarity_squared() {
     };
     assert_eq!(first.title, "Close");
     let ratio = second.similarity / first.similarity;
-    // The 2/10 movie is among the user's low ratings, which count 0.7 as much.
-    let expected = ratio.powi(SIMILARITY_POWER) * 0.7;
+    let expected = ratio.powi(SIMILARITY_POWER);
     assert!(
         (second.weight - expected).abs() < 1e-5,
         "weight {} vs {expected}",
@@ -582,9 +577,8 @@ fn closer_neighbours_count_by_similarity_squared() {
 }
 
 #[test]
-fn bad_ratings_count_less_than_equally_similar_good_ones() {
-    // Equally similar to a 10/10 and a 1/10: without the reduced impact the
-    // prediction would be exactly the midpoint, 5.5.
+fn equally_similar_ratings_count_the_same_however_low() {
+    // Equally similar to a 10/10 and a 1/10, so the prediction is the midpoint.
     let good = comedy(1, 10);
     let bad = comedy(2, 20);
     let candidate = movie(
@@ -605,39 +599,10 @@ fn bad_ratings_count_less_than_equally_similar_good_ones() {
     let explanation = movie_match::scoring::explain(&p, &candidate);
     let weights: Vec<_> = explanation.neighbours.iter().map(|n| n.weight).collect();
     assert_eq!(weights.len(), 2);
-    assert!((weights[1] - 0.7 * weights[0]).abs() < 1e-5, "{weights:?}");
-    assert!(explanation.predicted_rating > 5.5);
-}
-
-#[test]
-fn low_ratings_are_the_users_bottom_forty_percent() {
-    let ratings = [5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 10.0, 10.0, 10.0, 10.0];
-    let rated_movies: Vec<_> = ratings
-        .iter()
-        .zip(0..)
-        .map(|(&r, i)| rated(&comedy(i, 100 + i), r))
-        .collect();
-    let p = profile(&rated_movies, &[], &[]);
-
-    // The rating at position ceil(0.4 × 10) = 4 is 9, so 5 to 8 are low.
-    assert_eq!(p.low_rating_cutoff(), 9.0);
-    assert!(p.is_low_rating(8.0));
-    assert!(p.is_low_rating(6.0));
-    assert!(!p.is_low_rating(9.0));
-}
-
-#[test]
-fn ties_at_the_cutoff_are_not_low() {
-    // Mostly 8s: the cutoff lands on 8, and only the 6 is below it.
-    let ratings = [6.0, 8.0, 8.0, 8.0, 8.0];
-    let rated_movies: Vec<_> = ratings
-        .iter()
-        .zip(0..)
-        .map(|(&r, i)| rated(&comedy(i, 100 + i), r))
-        .collect();
-    let p = profile(&rated_movies, &[], &[]);
-
-    assert_eq!(p.low_rating_cutoff(), 8.0);
-    assert!(p.is_low_rating(6.0));
-    assert!(!p.is_low_rating(8.0));
+    assert!((weights[1] - weights[0]).abs() < 1e-6, "{weights:?}");
+    assert!(
+        (explanation.predicted_rating - 5.5).abs() < 1e-4,
+        "predicted {}",
+        explanation.predicted_rating
+    );
 }
