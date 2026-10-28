@@ -16,6 +16,14 @@ pub const RIDGE: f32 = 10.0;
 /// How many features [`AudienceShift::predict`] names as reasons.
 const MAX_REASONS: usize = 3;
 
+/// The fit stops once its residual is this small relative to where it started:
+/// far finer than the 0.1-point shifts the app shows.
+const TOLERANCE: f64 = 1e-10;
+
+/// A cap on the fit's iterations. It normally converges in a few hundred, since
+/// the ridge keeps the system well conditioned.
+const MAX_ITERATIONS: usize = 5_000;
+
 /// A user's average difference from the audience plus a shift per feature (genre,
 /// director, writer, actor, keyword), fitted jointly by ridge regression to how far
 /// each rated movie's difference strays from that average. Fitting jointly means a
@@ -56,9 +64,6 @@ impl AudienceShift {
     }
 
     /// [`AudienceShift::fit`] at another ridge strength.
-    ///
-    /// Solved in its dual form, `(K + ridge × I) α = differences` with `K` the movies'
-    /// pairwise feature overlaps, since there are far fewer movies than features.
     pub fn fit_with(rated: &[RatedDetails], weights: FieldWeights, ridge: f32) -> Option<Self> {
         let train: Vec<(Features, f64)> = rated
             .iter()
@@ -67,33 +72,7 @@ impl AudienceShift {
                 Some((features::extract(&r.movie, &weights), f64::from(diff)))
             })
             .collect();
-        if train.is_empty() {
-            return None;
-        }
-        let average = train.iter().map(|(_, d)| d).sum::<f64>() / train.len() as f64;
-        let targets: Vec<f64> = train.iter().map(|(_, d)| d - average).collect();
-        let system: Vec<Vec<f64>> = train
-            .iter()
-            .enumerate()
-            .map(|(a, (fa, _))| {
-                train
-                    .iter()
-                    .enumerate()
-                    .map(|(b, (fb, _))| {
-                        let diagonal = if a == b { f64::from(ridge) } else { 0.0 };
-                        dot(fa, fb) + diagonal
-                    })
-                    .collect()
-            })
-            .collect();
-        let alpha = solve_positive_definite(system, &targets)?;
-        // Back to one shift per feature: the sum over movies of α × feature value.
-        let mut per_feature = BTreeMap::new();
-        for ((feats, _), a) in train.iter().zip(&alpha) {
-            for (token, value) in feats {
-                *per_feature.entry(token.clone()).or_insert(0.0) += a * f64::from(*value);
-            }
-        }
+        let (average, per_feature) = fit_features(&train, f64::from(ridge))?;
         Some(Self {
             weights,
             average: average as f32,
@@ -125,6 +104,95 @@ impl AudienceShift {
             reasons,
         }
     }
+}
+
+/// The average of `train`'s differences, and one shift per feature fitted by ridge
+/// regression to how far each movie's difference strays from it. `None` for no
+/// movies.
+///
+/// Solves `(Xᵀ X + ridge × I) w = Xᵀ t` (movies' features `X`, centred differences
+/// `t`) by conjugate gradient, touching only the features each movie has, so time
+/// and memory grow with the number of ratings rather than its square or cube. The
+/// same solution as the dual form [`solve_positive_definite`] finds from the
+/// movies' pairwise overlaps, which a few thousand ratings would make seconds of
+/// work and tens of megabytes.
+fn fit_features(train: &[(Features, f64)], ridge: f64) -> Option<(f64, BTreeMap<String, f64>)> {
+    if train.is_empty() {
+        return None;
+    }
+    let average = train.iter().map(|(_, d)| d).sum::<f64>() / train.len() as f64;
+    // Each distinct feature gets a column; each movie is a sparse row of them.
+    let mut columns: BTreeMap<&str, usize> = BTreeMap::new();
+    let rows: Vec<(Vec<(usize, f64)>, f64)> = train
+        .iter()
+        .map(|(feats, diff)| {
+            let row = feats
+                .iter()
+                .map(|(token, value)| {
+                    let next = columns.len();
+                    (*columns.entry(token).or_insert(next), f64::from(*value))
+                })
+                .collect();
+            (row, diff - average)
+        })
+        .collect();
+    let width = columns.len();
+    // v ↦ (Xᵀ X + ridge × I) v, one pass over the rows.
+    let apply = |v: &[f64]| -> Vec<f64> {
+        let mut out: Vec<f64> = v.iter().map(|x| ridge * x).collect();
+        for (row, _) in &rows {
+            let along: f64 = row.iter().map(|&(j, x)| x * v[j]).sum();
+            for &(j, x) in row {
+                out[j] += x * along;
+            }
+        }
+        out
+    };
+    let mut target = vec![0.0; width];
+    for (row, t) in &rows {
+        for &(j, x) in row {
+            target[j] += x * t;
+        }
+    }
+    let shifts = conjugate_gradient(apply, &target);
+    let per_feature = columns
+        .into_iter()
+        .map(|(token, j)| (token.to_string(), shifts[j]))
+        .collect();
+    Some((average, per_feature))
+}
+
+/// Solves `a x = b` for a symmetric positive-definite `a`, given only `x ↦ a x`,
+/// starting from 0 and stopping at [`TOLERANCE`] or [`MAX_ITERATIONS`].
+fn conjugate_gradient(apply: impl Fn(&[f64]) -> Vec<f64>, b: &[f64]) -> Vec<f64> {
+    let dot = |x: &[f64], y: &[f64]| -> f64 { x.iter().zip(y).map(|(a, b)| a * b).sum() };
+    let mut x = vec![0.0; b.len()];
+    let mut residual = b.to_vec();
+    let mut direction = residual.clone();
+    let mut squared = dot(&residual, &residual);
+    let stop = squared * TOLERANCE * TOLERANCE;
+    for _ in 0..MAX_ITERATIONS {
+        if squared <= stop || squared == 0.0 {
+            break;
+        }
+        let along = apply(&direction);
+        let step = squared / dot(&direction, &along);
+        for ((xi, ri), (di, ai)) in x
+            .iter_mut()
+            .zip(residual.iter_mut())
+            .zip(direction.iter().zip(&along))
+        {
+            *xi += step * di;
+            *ri -= step * ai;
+        }
+        let next = dot(&residual, &residual);
+        let keep = next / squared;
+        for (di, ri) in direction.iter_mut().zip(&residual) {
+            *di = ri + keep * *di;
+        }
+        squared = next;
+    }
+    x
 }
 
 /// Sum of products of the features two movies share.
@@ -178,4 +246,81 @@ pub(crate) fn solve_positive_definite(mut a: Vec<Vec<f64>>, b: &[f64]) -> Option
         x[i] = s / a[i][i];
     }
     Some(x)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn features(pairs: &[(&str, f32)]) -> Features {
+        pairs.iter().map(|(t, v)| (t.to_string(), *v)).collect()
+    }
+
+    /// The per-feature shifts from the dual form: `α = (K + ridge × I)⁻¹ t`, then
+    /// each feature's shift is the sum over movies of α × its value.
+    fn dual_shifts(train: &[(Features, f64)], ridge: f64) -> BTreeMap<String, f64> {
+        let average = train.iter().map(|(_, d)| d).sum::<f64>() / train.len() as f64;
+        let targets: Vec<f64> = train.iter().map(|(_, d)| d - average).collect();
+        let system = train
+            .iter()
+            .enumerate()
+            .map(|(a, (fa, _))| {
+                train
+                    .iter()
+                    .enumerate()
+                    .map(|(b, (fb, _))| dot(fa, fb) + if a == b { ridge } else { 0.0 })
+                    .collect()
+            })
+            .collect();
+        let alpha = solve_positive_definite(system, &targets).expect("positive definite");
+        let mut shifts = BTreeMap::new();
+        for ((feats, _), a) in train.iter().zip(&alpha) {
+            for (token, value) in feats {
+                *shifts.entry(token.clone()).or_insert(0.0) += a * f64::from(*value);
+            }
+        }
+        shifts
+    }
+
+    #[test]
+    fn conjugate_gradient_matches_the_exact_dual_solution() {
+        // Overlapping genres, directors and actors, with differences that only
+        // partly follow them, so no shift is trivially 0.
+        let train: Vec<(Features, f64)> = (0..40)
+            .map(|i: u32| {
+                let feats = features(&[
+                    (["g:drama", "g:horror", "g:comedy"][i as usize % 3], 2.0),
+                    (&format!("dir:{}", i % 7), 3.0),
+                    (&format!("cast:{}", i % 11), 2.0),
+                    (&format!("cast:{}", (i * 5) % 13 + 20), 1.0),
+                    (&format!("kw:{}", i % 5), 1.5),
+                ]);
+                let diff = f64::from(i % 7) * 0.3 - f64::from(i % 3) * 0.5 + f64::from(i % 4) * 0.1;
+                (feats, diff)
+            })
+            .collect();
+        for ridge in [1.0, 10.0, 100.0] {
+            let (_, fitted) = fit_features(&train, ridge).expect("movies");
+            let exact = dual_shifts(&train, ridge);
+            assert_eq!(fitted.len(), exact.len());
+            for (token, shift) in &exact {
+                assert!(
+                    (fitted[token] - shift).abs() < 1e-7,
+                    "{token}: {} vs {shift} at ridge {ridge}",
+                    fitted[token]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn identical_differences_need_no_shift() {
+        let train = vec![
+            (features(&[("g:drama", 2.0)]), 1.0),
+            (features(&[("g:horror", 2.0)]), 1.0),
+        ];
+        let (average, shifts) = fit_features(&train, 10.0).expect("movies");
+        assert_eq!(average, 1.0);
+        assert!(shifts.values().all(|s| *s == 0.0), "{shifts:?}");
+    }
 }
