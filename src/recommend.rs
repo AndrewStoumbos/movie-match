@@ -321,9 +321,10 @@ async fn signals(
 
 /// Each of `movies`' estimated audience score from its directors', writers' and
 /// top [`TRACK_RECORD_CAST`] actors' earlier films (see [`quality::estimate`]),
-/// fetching their filmographies (cached for a month). The typical score comes from
-/// those same filmographies. `None` when none of their films has enough votes to
-/// set it.
+/// fetching their filmographies (cached for a month). A person whose films fail to
+/// load is left out (see [`Fetcher::filmographies_or_skip`]). The typical score
+/// comes from those same filmographies. `None` when none of their films has enough
+/// votes to set it.
 async fn track_records(
     fetcher: &Fetcher,
     movies: &[&MovieDetails],
@@ -340,9 +341,11 @@ async fn track_records(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
+    // Track records only nudge a score, so a person whose films don't load is left
+    // out (with a warning) rather than failing the ranking.
     let filmographies: HashMap<u64, Vec<CreditedFilm>> = people
         .iter()
-        .zip(fetcher.filmographies(&people).await?)
+        .zip(fetcher.filmographies_or_skip(&people).await)
         .filter_map(|(person, films)| Some((*person, films?)))
         .collect();
     let Some(typical) = quality::typical_score(&filmographies) else {

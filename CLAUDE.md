@@ -33,7 +33,10 @@ movies the user likes. See README.md for the roadmap.
   `details_cache_key` (use it in tests, never a literal key). `details` fails on any
   failed id; `available_details` (used by the catalog) skips only ids TMDB answers
   404 for (`tmdb::is_not_found`), with one summary warning, and fails on other errors;
-  `details_if_found` gives `None` per 404 and also fails on other errors
+  `details_if_found` gives `None` per 404 and also fails on other errors;
+  `filmographies` fails on non-404 errors (evaluation tools), `filmographies_or_skip`
+  (ranking's track records) gives `None` for any failure, warns once, and stops asking
+  TMDB after `MAX_FILMOGRAPHY_FAILURES`
 - `src/dates.rs`  `Date`: `YYYY-MM-DD` calendar maths (unix days, months earlier). Pure.
 - `src/catalog.rs` `Catalog`: shared movies and IDF, same for every user. Upcoming is
   first released today (local date) or later, optionally only films with a cinema
