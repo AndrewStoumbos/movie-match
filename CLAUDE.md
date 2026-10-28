@@ -26,7 +26,9 @@ movies the user likes. See README.md for the roadmap.
   (`OVERALL_SHRINK`), so exactly the overall average with none). `score_detailed` (with
   reasons), `explain` (for `--explain`), `rank`. Pure.
 - `src/shift.rs`  `AudienceShift`: the user's average difference from the audience plus a
-  ridge-fitted shift per feature (`RIDGE`, light). Pure.
+  ridge-fitted shift per feature (`RIDGE`, light), solved in feature space by conjugate
+  gradient (milliseconds for thousands of ratings; never build the n×n movie matrix).
+  The exact dual solver stays for `evaluate`'s leave-one-out. Pure.
 - `src/cache.rs`  `DiskCache`: JSON files with expiry under `data/cache/` (gitignored).
   Callers save with `put_or_warn`: a failed cache write is a warning, not an error
 - `src/fetch.rs`  `Fetcher`: TMDB client + cached movie details, keyed by
