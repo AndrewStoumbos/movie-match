@@ -99,7 +99,7 @@ Run the tests with `cargo test`.
 3. **Rarity (IDF).** Each token is also weighted by how rare it is across the shared
    catalog (the upcoming releases plus a few pages of popular movies), using
    `ln((1 + N) / (1 + df)) + 1`. Sharing a director counts far more than sharing "Drama".
-4. **Predicted rating.** Every rated movie is kept as its own vector. For each release
+4. **Similarity rating.** Every rated movie is kept as its own vector. For each release
    separately, the 20 rated movies most similar to it are picked by similarity alone,
    whatever you rated them, so a sci-fi release is judged by your sci-fi-like ratings
    and a drama by your drama-like ones. Each neighbour's **weight** is its similarity
@@ -110,13 +110,28 @@ Run the tests with `cargo test`.
    last of the 20 places (say 60 dramas a release shares only "Drama" with) are all
    kept and split the places left, so the order of your ratings file never matters.
 
-   The score is the weighted average of those neighbours' ratings × 10, blended with
-   your overall average only by **how many** neighbours there are:
+   The similarity rating is the weighted average of those neighbours' ratings, blended
+   with your overall average only by **how many** neighbours there are:
    `(n × weighted average + 5 × your overall average) / (n + 5)`. With the full 20
-   neighbours your overall average is a fifth of the score; with one stray overlap it's
-   most of it, so one film can't decide a score; a release sharing nothing gets exactly
-   your average. `--explain` prints the breakdown. Constants live in `scoring.rs`.
-5. **Explanation.** The output names the most similar liked movie and the three shared
+   neighbours your overall average is a fifth of it; with one stray overlap it's most
+   of it, so one film can't decide a score; a release sharing nothing gets exactly
+   your average.
+5. **Track record.** A film's likely audience score is estimated from its directors',
+   writers' and top 3 actors' **earlier** films (`quality.rs`), and the similarity
+   rating is nudged by how far that sits from the typical film's:
+   `+ 1.0 × (estimate − typical)`. This is the **unreleased** formula.
+6. **Audience and your shift.** Once a film has TMDB audience votes, the **released**
+   formula is its audience score plus your usual difference from the audience for films
+   like it: your average difference plus a shift per genre, director, writer, actor and
+   keyword, learned from your rated films by ridge regression (`shift.rs`). The raw
+   audience score is never used alone: people rate on different scales.
+7. **Blend.** The score is `share × released + (1 − share) × unreleased` with
+   `share = votes / (votes + 100)`, so a festival film with 10 votes is mostly the
+   unreleased formula and one with 5,000 almost all the released one. Tested by
+   leave-one-out on MovieLens (610 users), this misses by 1.26 points on average
+   against 1.36 for similarity alone, and orders each user's films about twice as well.
+   `--explain` prints the breakdown. Constants live in `scoring.rs`.
+8. **Explanation.** The output names the most similar liked movie and the three shared
    features that contributed most, plus the most similar disliked movie among the 20.
 
 The upcoming and popular lists and the rarity table are the same for every user, so
@@ -149,6 +164,7 @@ ranking against each other.
 │   ├── features.rs             # movie -> field-weighted feature tokens + labels
 │   ├── tfidf.rs                # IDF table, vectors, cosine similarity
 │   ├── scoring.rs              # scores, explanations and ranking (pure)
+│   ├── shift.rs                # your per-feature difference from the audience (pure)
 │   ├── cache.rs                # JSON file cache with expiry
 │   ├── fetch.rs                # TMDB client + cached movie details
 │   ├── catalog.rs              # shared upcoming/popular movies and rarity table
@@ -158,6 +174,7 @@ ranking against each other.
 │       └── models.rs           # TMDB response types
 ├── tests/
 │   ├── scoring.rs              # scoring, dislikes, explanations, ranking
+│   ├── two_case.rs             # audience shift, track-record nudge, vote blend
 │   ├── features.rs             # feature extraction and TF-IDF
 │   ├── profile.rs              # ratings file parsing and validation
 │   ├── cache.rs                # disk cache behaviour

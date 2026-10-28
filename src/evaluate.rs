@@ -4,14 +4,16 @@
 //! predictions are compared with the real ratings, next to simple baselines. Pure:
 //! the caller supplies the rated movies' details and the rarity table.
 
-use std::collections::HashMap;
-
 use crate::features::{self, Features, FieldWeights};
 use crate::profile::{RatedDetails, TasteProfile};
-use crate::scoring::{self, NEIGHBOURS, OVERALL_SHRINK, SIMILARITY_POWER};
+use crate::scoring::{self, TrackRecords, NEIGHBOURS, OVERALL_SHRINK, SIMILARITY_POWER};
+use crate::shift::{self, dot, solve_positive_definite};
 use crate::tfidf::{Idf, Vector};
 
-/// The methods compared, in the order they're reported. From "audience + avg diff"
+/// The methods compared, in the order they're reported. "movie-match" is the
+/// scoring the app uses (see [`scoring::blend`]): "similarity only" nudged by the
+/// track record when estimates are supplied, blended by vote count with "audience +
+/// shift (light)". From "audience + avg diff"
 /// on, each predicts the audience score plus the user's usual difference from it
 /// ("diff" = user rating minus TMDB audience score): on average across all their
 /// ratings, on the movies most similar to this one, or as a per-feature shift
@@ -22,8 +24,9 @@ use crate::tfidf::{Idf, Vector};
 /// real audience score they use an estimate made without it (from cast and crew
 /// track records, see [`crate::quality`]). The user's diffs still come from their
 /// other movies' real scores. They only predict when estimates are supplied.
-pub const METHODS: [&str; 13] = [
+pub const METHODS: [&str; 14] = [
     "movie-match",
+    "similarity only",
     "your average",
     "closest rated movie",
     "TMDB audience score",
@@ -41,7 +44,7 @@ pub const METHODS: [&str; 13] = [
 /// Ridge strengths for the per-feature shift, light to strong: how hard each
 /// feature's shift is pulled toward 0 when the evidence for it is thin. In the units
 /// of a movie's squared field weights (one director alone contributes 3² = 9).
-pub const SHIFT_RIDGE: [f32; 3] = [10.0, 30.0, 100.0];
+pub const SHIFT_RIDGE: [f32; 3] = [shift::RIDGE, 30.0, 100.0];
 
 /// One rated movie's real rating and what each method predicted for it.
 #[derive(Debug, Clone)]
@@ -50,7 +53,7 @@ pub struct EvaluatedMovie {
     pub rating: f32,
     /// One entry per [`METHODS`] item; `None` where a method has no prediction
     /// (the audience-based ones for a movie nobody has voted on).
-    pub predictions: [Option<f32>; 13],
+    pub predictions: [Option<f32>; 14],
 }
 
 /// How one method did across all the movies it could predict.
@@ -84,12 +87,12 @@ pub fn leave_one_out(rated: &[RatedDetails], idf: &Idf, weights: FieldWeights) -
 }
 
 /// [`leave_one_out`], with `quality` holding a pre-release quality estimate per TMDB
-/// id for the "est. quality" methods.
+/// id for the "est. quality" methods and movie-match's track-record nudge.
 pub fn leave_one_out_with_quality(
     rated: &[RatedDetails],
     idf: &Idf,
     weights: FieldWeights,
-    quality: Option<&HashMap<u64, f32>>,
+    quality: Option<&TrackRecords>,
 ) -> Evaluation {
     let mut movies = Vec::with_capacity(rated.len());
     if rated.len() >= 2 {
@@ -121,13 +124,26 @@ pub fn leave_one_out_with_quality(
             let audience = hidden.movie.audience_rating();
             let (avg_diff, similar_diff) = audience_differences(&others, &profile, &candidate);
             let plus = |diff: Option<f32>| Some((audience? + diff?).clamp(0.0, 10.0));
-            let estimated = quality.and_then(|q| q.get(&hidden.movie.id)).copied();
+            let estimated = quality
+                .and_then(|q| q.estimates.get(&hidden.movie.id))
+                .copied();
             let plus_estimated = |diff: Option<f32>| Some((estimated? + diff?).clamp(0.0, 10.0));
             let [light, medium, strong] = feature_shifts(rated, &overlap, i);
+            let unreleased = scoring::nudged(
+                prediction.rating,
+                estimated,
+                quality.map_or(0.0, |q| q.typical),
+            );
+            let (movie_match, _) = scoring::blend(
+                unreleased,
+                plus(light),
+                hidden.movie.vote_count.unwrap_or(0),
+            );
             movies.push(EvaluatedMovie {
                 title: hidden.movie.title.clone(),
                 rating: hidden.rating,
                 predictions: [
+                    Some(movie_match),
                     Some(prediction.rating),
                     Some(average),
                     Some(closest),
@@ -273,59 +289,6 @@ fn feature_shifts(rated: &[RatedDetails], overlap: &[Vec<f64>], hidden: usize) -
     })
 }
 
-/// Sum of products of the features two movies share.
-fn dot(a: &Features, b: &Features) -> f64 {
-    let (small, large) = if a.len() <= b.len() { (a, b) } else { (b, a) };
-    small
-        .iter()
-        .filter_map(|(token, x)| large.get(token).map(|y| f64::from(x * y)))
-        .sum()
-}
-
-/// Solves `a x = b` for a symmetric positive-definite `a` by Cholesky decomposition.
-/// `None` if `a` isn't positive definite.
-#[allow(clippy::needless_range_loop)] // index-based reads the clearest for this algebra
-fn solve_positive_definite(mut a: Vec<Vec<f64>>, b: &[f64]) -> Option<Vec<f64>> {
-    let n = b.len();
-    // In place: the lower triangle of `a` becomes L, with a = L × Lᵀ.
-    for j in 0..n {
-        let mut d = a[j][j];
-        for k in 0..j {
-            d -= a[j][k] * a[j][k];
-        }
-        if d <= 0.0 {
-            return None;
-        }
-        let d = d.sqrt();
-        a[j][j] = d;
-        for i in j + 1..n {
-            let mut s = a[i][j];
-            for k in 0..j {
-                s -= a[i][k] * a[j][k];
-            }
-            a[i][j] = s / d;
-        }
-    }
-    // L y = b, then Lᵀ x = y.
-    let mut y = vec![0.0; n];
-    for i in 0..n {
-        let mut s = b[i];
-        for k in 0..i {
-            s -= a[i][k] * y[k];
-        }
-        y[i] = s / a[i][i];
-    }
-    let mut x = vec![0.0; n];
-    for i in (0..n).rev() {
-        let mut s = y[i];
-        for k in i + 1..n {
-            s -= a[k][i] * x[k];
-        }
-        x[i] = s / a[i][i];
-    }
-    Some(x)
-}
-
 fn summarize(name: &'static str, pairs: &[(f32, f32)], ranks: bool) -> MethodResult {
     let count = pairs.len();
     if count == 0 {
@@ -360,7 +323,7 @@ pub fn leave_one_out_each(
     users: &[Vec<RatedDetails>],
     idf: &Idf,
     weights: FieldWeights,
-    quality: Option<&HashMap<u64, f32>>,
+    quality: Option<&TrackRecords>,
 ) -> Vec<Evaluation> {
     let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
     let chunk = users.len().div_ceil(threads).max(1);
@@ -471,13 +434,17 @@ pub fn across_users(evaluations: &[Evaluation]) -> UsersReport {
         .collect();
 
     // Agreement with the crowd: the user's ratings against the audience scores.
+    let audience = METHODS
+        .iter()
+        .position(|&m| m == "TMDB audience score")
+        .unwrap_or_default();
     let mut by_agreement: Vec<(f32, &Evaluation)> = evaluations
         .iter()
         .filter_map(|e| {
             let (ratings, audience): (Vec<f32>, Vec<f32>) = e
                 .movies
                 .iter()
-                .filter_map(|movie| Some((movie.rating, movie.predictions[3]?)))
+                .filter_map(|movie| Some((movie.rating, movie.predictions[audience]?)))
                 .unzip();
             Some((spearman(&ratings, &audience)?, *e))
         })
@@ -525,17 +492,17 @@ pub struct NudgeReport {
     /// The strength with the lowest MAE on the tuning users.
     pub best: f32,
     /// Every strength in [`NUDGE_STRENGTHS`] on the checking users, which tuning
-    /// never saw. Strength 0 is movie-match unchanged.
+    /// never saw. Strength 0 is "similarity only" unchanged.
     pub check: Vec<(f32, GroupScores)>,
 }
 
-/// Tunes `movie-match + strength × (estimated quality − typical)` (clamped to 0 to
-/// 10): picks the [`NUDGE_STRENGTHS`] value with the lowest MAE on every other user
+/// Tunes `similarity only + strength × (estimated quality − typical)` (clamped to 0
+/// to 10): picks the [`NUDGE_STRENGTHS`] value with the lowest MAE on every other user
 /// in `evaluations`, then scores every strength on the remaining users. Uses the
-/// "movie-match" and "est. quality" predictions, so the evaluations need quality
+/// "similarity only" and "est. quality" predictions, so the evaluations need quality
 /// estimates; `None` without any. Ties keep the weaker nudge.
 pub fn tune_nudge(evaluations: &[Evaluation], typical: f32) -> Option<NudgeReport> {
-    let movie_match = METHODS.iter().position(|&m| m == "movie-match")?;
+    let movie_match = METHODS.iter().position(|&m| m == "similarity only")?;
     let estimated = METHODS.iter().position(|&m| m == "est. quality")?;
     // Per user: (real rating, movie-match prediction, estimated quality).
     let users: Vec<Vec<(f32, f32, f32)>> = evaluations

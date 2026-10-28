@@ -10,7 +10,9 @@ use movie_match::evaluate;
 use movie_match::fetch::Fetcher;
 use movie_match::movielens;
 use movie_match::profile::{self, RatedMovie, DISLIKED_UP_TO, LIKED_FROM};
+use movie_match::quality;
 use movie_match::recommend::{self, Options};
+use movie_match::scoring;
 use movie_match::tmdb::{Region, TmdbClient};
 
 /// Rate upcoming movies by how likely you are to enjoy them.
@@ -106,7 +108,7 @@ struct Cli {
     track_record_films: usize,
 
     /// With --evaluate-track-record: how many top-billed actors' records to use.
-    #[arg(long, default_value_t = 3)]
+    #[arg(long, default_value_t = quality::TRACK_RECORD_CAST)]
     track_record_cast: usize,
 }
 
@@ -246,9 +248,14 @@ async fn explain(
         "{} [{}]: score {} (predicted {:.2}/10)",
         movie.title, movie.release_date, explanation.score, explanation.predicted_rating
     );
+    print_breakdown(&explanation.breakdown);
+    println!(
+        "\nSimilarity rating {:.2}:",
+        explanation.breakdown.similarity
+    );
     if !explanation.neighbours.is_empty() {
         println!(
-            "Weighted average of these movies: {:.2}; your overall average {:.2} makes up {:.0}% of the score ({} neighbours).",
+            "Weighted average of these movies: {:.2}; your overall average {:.2} makes up {:.0}% of the similarity rating ({} neighbours).",
             explanation.neighbour_rating,
             explanation.mean_rating,
             explanation.overall_share * 100.0,
@@ -276,6 +283,45 @@ async fn explain(
         }
     }
     Ok(())
+}
+
+/// How the similarity rating, track record and audience made the predicted rating.
+fn print_breakdown(breakdown: &scoring::Breakdown) {
+    let audience_share = breakdown.audience_share * 100.0;
+    if let Some(audience) = &breakdown.audience {
+        let shift = &audience.shift;
+        let reasons: Vec<String> = shift
+            .reasons
+            .iter()
+            .map(|(label, value)| format!("{label} {value:+.1}"))
+            .collect();
+        println!(
+            "Released ({audience_share:.0}% of the score): audience {:.1} ({} votes) + your shift {:+.2} = {:.2}",
+            audience.score,
+            audience.votes,
+            shift.total(),
+            audience.rating
+        );
+        println!(
+            "  shift: you usually rate {:+.2} vs the audience{}{}",
+            shift.average,
+            if reasons.is_empty() { "" } else { "; " },
+            reasons.join(", ")
+        );
+    }
+    let nudge = match &breakdown.track_record {
+        Some(t) => format!(
+            " + track record {:+.2} (cast and crew's earlier films {:.2} vs typical {:.2})",
+            t.nudge, t.estimate, t.typical
+        ),
+        None => " (no track record)".to_string(),
+    };
+    println!(
+        "Unreleased ({:.0}% of the score): similarity {:.2}{nudge} = {:.2}",
+        100.0 - audience_share,
+        breakdown.similarity,
+        breakdown.unreleased
+    );
 }
 
 async fn evaluate(fetcher: &Fetcher, movies: &[RatedMovie], options: &Options) -> Result<()> {
@@ -437,8 +483,8 @@ async fn evaluate_movielens(
 
     if let Some(nudge) = &result.nudge {
         println!(
-            "\nmovie-match + strength x (estimated quality - typical): strength tuned on {} users, \
-             checked on the other {}.",
+            "\nUnreleased formula, similarity only + strength x (estimated quality - typical): \
+             strength tuned on {} users, checked on the other {}.",
             nudge.tune_users, nudge.check_users
         );
         println!(
@@ -449,9 +495,10 @@ async fn evaluate_movielens(
             let spearman = scores
                 .mean_spearman
                 .map_or_else(|| "-".to_string(), |s| format!("{s:.3}"));
-            let marks = match (*strength == 0.0, *strength == nudge.best) {
-                (true, true) => "  <- current scoring, and tuned",
-                (true, false) => "  <- current scoring",
+            let used = *strength == scoring::TRACK_RECORD_NUDGE;
+            let marks = match (used, *strength == nudge.best) {
+                (true, true) => "  <- used in scoring, and tuned",
+                (true, false) => "  <- used in scoring",
                 (false, true) => "  <- tuned",
                 (false, false) => "",
             };
