@@ -256,10 +256,6 @@ async fn explain(
         );
         println!("Nearest rated movies (weight = (similarity / closest similarity)²):");
     }
-    println!(
-        "Your bottom 40% of ratings (below {}/10) count 30% less.",
-        rating_text(explanation.low_rating_cutoff)
-    );
     if explanation.neighbours.is_empty() {
         println!(
             "  none share any features, so the score is your overall average ({:.2})",
