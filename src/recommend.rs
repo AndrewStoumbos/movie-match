@@ -50,6 +50,20 @@ pub struct Ranking {
     pub recent: Vec<Ranked>,
 }
 
+/// The steps of a ranking, reported as each starts (see [`rank_upcoming_reporting`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stage {
+    /// Listing upcoming, recent and popular movies (cached for a day).
+    Catalog,
+    /// Matching the user's ratings to TMDB.
+    Ratings,
+    /// Fetching the filmographies of this many cast and crew (cached for a month).
+    TrackRecords {
+        people: usize,
+    },
+    Scoring,
+}
+
 /// Ranks the catalog's upcoming and recent releases for one user (see
 /// [`scoring::rank_with`]), with their difference from the audience and the
 /// candidates' cast and crew track records.
@@ -58,7 +72,19 @@ pub async fn rank_upcoming(
     movies: &[RatedMovie],
     options: &Options,
 ) -> Result<Ranking> {
+    rank_upcoming_reporting(fetcher, movies, options, |_| {}).await
+}
+
+/// [`rank_upcoming`], calling `report` as each [`Stage`] starts.
+pub async fn rank_upcoming_reporting(
+    fetcher: &Fetcher,
+    movies: &[RatedMovie],
+    options: &Options,
+    report: impl Fn(Stage) + Send + Sync,
+) -> Result<Ranking> {
+    report(Stage::Catalog);
     let catalog = Catalog::load(fetcher, options.catalog).await?;
+    report(Stage::Ratings);
     let resolved = resolve(fetcher, movies).await?;
     let profile = TasteProfile::new(
         &resolved.rated,
@@ -66,7 +92,8 @@ pub async fn rank_upcoming(
         options.weights,
     );
     let candidates: Vec<&MovieDetails> = catalog.upcoming.iter().chain(&catalog.recent).collect();
-    let signals = signals(fetcher, &resolved, &candidates, options.weights).await?;
+    let signals = signals(fetcher, &resolved, &candidates, options.weights, &report).await?;
+    report(Stage::Scoring);
     let ranked = scoring::rank_with(&profile, &signals, &catalog.upcoming);
     let recent = scoring::rank_with(&profile, &signals, &catalog.recent);
     Ok(Ranking {
@@ -180,6 +207,7 @@ pub async fn evaluate_movielens(
             typical_quality = quality::typical_score(&filmographies);
             typical_quality.map(|typical| TrackRecords {
                 typical,
+                people: HashMap::new(),
                 estimates: details
                     .values()
                     .map(|movie| {
@@ -300,7 +328,7 @@ pub async fn explain_movie(
         .chain(&catalog.recent)
         .chain([&movie])
         .collect();
-    let signals = signals(fetcher, &resolved, &candidates, options.weights).await?;
+    let signals = signals(fetcher, &resolved, &candidates, options.weights, &|_| {}).await?;
     let explanation = scoring::explain_with(&profile, &signals, &movie);
     Ok(Some((movie, explanation)))
 }
@@ -312,10 +340,11 @@ async fn signals(
     resolved: &Resolved,
     candidates: &[&MovieDetails],
     weights: FieldWeights,
+    report: &(dyn Fn(Stage) + Send + Sync),
 ) -> Result<Signals> {
     Ok(Signals {
         shift: AudienceShift::fit(&resolved.rated, weights),
-        track_records: track_records(fetcher, candidates, &weights).await?,
+        track_records: track_records(fetcher, candidates, &weights, report).await?,
     })
 }
 
@@ -329,6 +358,7 @@ async fn track_records(
     fetcher: &Fetcher,
     movies: &[&MovieDetails],
     weights: &FieldWeights,
+    report: &(dyn Fn(Stage) + Send + Sync),
 ) -> Result<Option<TrackRecords>> {
     let credits: Vec<Vec<quality::Credit>> = movies
         .iter()
@@ -341,6 +371,9 @@ async fn track_records(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
+    report(Stage::TrackRecords {
+        people: people.len(),
+    });
     // Track records only nudge a score, so a person whose films don't load is left
     // out (with a warning) rather than failing the ranking.
     let filmographies: HashMap<u64, Vec<CreditedFilm>> = people
@@ -351,15 +384,18 @@ async fn track_records(
     let Some(typical) = quality::typical_score(&filmographies) else {
         return Ok(None);
     };
-    let estimates = movies
-        .iter()
-        .zip(&credits)
-        .filter_map(|(movie, credits)| {
-            let estimate = quality::estimate(movie, credits, &filmographies, typical)?;
-            Some((movie.id, estimate))
-        })
-        .collect();
-    Ok(Some(TrackRecords { typical, estimates }))
+    let mut records = TrackRecords {
+        typical,
+        ..TrackRecords::default()
+    };
+    for (movie, credits) in movies.iter().zip(&credits) {
+        if let Some(estimate) = quality::estimate(movie, credits, &filmographies, typical) {
+            records.estimates.insert(movie.id, estimate);
+            let people = quality::records(movie, credits, &filmographies, typical);
+            records.people.insert(movie.id, people);
+        }
+    }
+    Ok(Some(records))
 }
 
 /// Matches each rated movie to TMDB (by id, or else by title search) and fetches

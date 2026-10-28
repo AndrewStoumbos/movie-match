@@ -322,6 +322,19 @@ fn print_breakdown(breakdown: &scoring::Breakdown) {
         breakdown.similarity,
         breakdown.unreleased
     );
+    for person in breakdown.track_record.iter().flat_map(|t| &t.people) {
+        println!(
+            "  {:?} {}: earlier films average {:.2} ({} films)",
+            person.role, person.name, person.record, person.films
+        );
+    }
+    if breakdown.is_unusual() {
+        println!(
+            "Not your usual kind of film: the closest movie you've rated is only {:.3} similar, \
+             so treat the score as a rough guess.",
+            breakdown.closest_similarity
+        );
+    }
 }
 
 async fn evaluate(fetcher: &Fetcher, movies: &[RatedMovie], options: &Options) -> Result<()> {

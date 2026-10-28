@@ -173,6 +173,7 @@ fn estimated_quality_matching_the_audience_gives_the_audience_results() {
         r.movie.vote_count = Some(500);
     }
     let estimates = TrackRecords {
+        people: Default::default(),
         typical: 5.5,
         estimates: rated_movies
             .iter()
@@ -278,6 +279,7 @@ fn nudge_tuning_picks_a_strength_and_scores_it_on_unseen_users() {
     // should nudge, and nudging should help on the users it didn't tune on.
     let users: Vec<_> = (0..4).map(|_| paired_ratings()).collect();
     let estimates = TrackRecords {
+        people: Default::default(),
         typical: 5.5,
         estimates: users[0].iter().map(|r| (r.movie.id, r.rating)).collect(),
     };

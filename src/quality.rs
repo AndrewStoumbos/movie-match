@@ -65,8 +65,32 @@ pub enum Role {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Credit {
     pub person: u64,
+    pub name: String,
     pub role: Role,
     pub weight: f32,
+}
+
+/// One person's track record behind an estimate (see [`records`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PersonRecord {
+    pub person: u64,
+    pub name: String,
+    pub role: Role,
+    /// Their weight in the estimate: their credit's weight × `n / (n + PERSON_SHRINK)`.
+    pub weight: f32,
+    /// The average of their earlier films' scores, each held toward the typical
+    /// score by [`PRIOR_VOTES`].
+    pub record: f32,
+    /// How many earlier films that's from.
+    pub films: usize,
+}
+
+impl PersonRecord {
+    /// How far this person moves an estimate away from `typical`, by weight; the
+    /// people with the largest are the ones worth naming.
+    pub fn pull(&self, typical: f32) -> f32 {
+        self.weight * (self.record - typical)
+    }
 }
 
 /// The people whose records count for `movie`: directors and writers at their field
@@ -74,27 +98,33 @@ pub struct Credit {
 pub fn credits(movie: &MovieDetails, weights: &FieldWeights, cast_limit: usize) -> Vec<Credit> {
     let mut credits = Vec::new();
     let mut seen = HashSet::new();
-    let mut add = |person: u64, role: Role, weight: f32| {
+    let mut add = |person: u64, name: &str, role: Role, weight: f32| {
         if seen.insert((person, role as u8)) {
             credits.push(Credit {
                 person,
+                name: name.to_string(),
                 role,
                 weight,
             });
         }
     };
     for person in movie.crew_with_job("Director") {
-        add(person.id, Role::Director, weights.director);
+        add(person.id, &person.name, Role::Director, weights.director);
     }
     for job in ["Screenplay", "Writer"] {
         for person in movie.crew_with_job(job) {
-            add(person.id, Role::Writer, weights.writer);
+            add(person.id, &person.name, Role::Writer, weights.writer);
         }
     }
     let mut cast: Vec<_> = movie.credits.cast.iter().collect();
     cast.sort_by_key(|actor| actor.order);
     for (i, actor) in cast.iter().take(cast_limit).enumerate() {
-        add(actor.id, Role::Cast, weights.cast / (i as f32 + 1.0));
+        add(
+            actor.id,
+            &actor.name,
+            Role::Cast,
+            weights.cast / (i as f32 + 1.0),
+        );
     }
     credits
 }
@@ -147,24 +177,57 @@ pub fn estimate_with(
     typical: f32,
     settings: &EstimateSettings,
 ) -> Option<f32> {
+    let records = records_with(movie, credits, filmographies, typical, settings);
+    let total: f32 = records.iter().map(|r| r.weight).sum();
+    let weighted: f32 = records.iter().map(|r| r.weight * r.record).sum();
+    let shrink = settings.estimate_shrink;
+    (total > 0.0).then(|| (weighted + shrink * typical) / (total + shrink))
+}
+
+/// The track records behind [`estimate`]: one per credited person with earlier
+/// films, in credit order. Empty without a release date.
+pub fn records(
+    movie: &MovieDetails,
+    credits: &[Credit],
+    filmographies: &HashMap<u64, Vec<CreditedFilm>>,
+    typical: f32,
+) -> Vec<PersonRecord> {
+    records_with(
+        movie,
+        credits,
+        filmographies,
+        typical,
+        &EstimateSettings::default(),
+    )
+}
+
+fn records_with(
+    movie: &MovieDetails,
+    credits: &[Credit],
+    filmographies: &HashMap<u64, Vec<CreditedFilm>>,
+    typical: f32,
+    settings: &EstimateSettings,
+) -> Vec<PersonRecord> {
     let EstimateSettings {
         prior_votes,
         person_shrink,
-        estimate_shrink,
+        ..
     } = *settings;
     if movie.release_date.is_empty() {
-        return None;
+        return Vec::new();
     }
-    let mut people: Vec<(u64, f32)> = Vec::new();
+    // A person credited twice counts once, in their highest-weighted role.
+    let mut people: Vec<&Credit> = Vec::new();
     for credit in credits {
-        match people.iter_mut().find(|(p, _)| *p == credit.person) {
-            Some((_, weight)) => *weight = weight.max(credit.weight),
-            None => people.push((credit.person, credit.weight)),
+        match people.iter_mut().find(|p| p.person == credit.person) {
+            Some(best) if credit.weight > best.weight => *best = credit,
+            Some(_) => {}
+            None => people.push(credit),
         }
     }
-    let (mut total, mut weighted) = (0.0, 0.0);
-    for (person, weight) in people {
-        let Some(films) = filmographies.get(&person) else {
+    let mut records = Vec::new();
+    for credit in people {
+        let Some(films) = filmographies.get(&credit.person) else {
             continue;
         };
         let earlier: Vec<f32> = films
@@ -184,12 +247,16 @@ pub fn estimate_with(
             continue;
         }
         let n = earlier.len() as f32;
-        let record = earlier.iter().sum::<f32>() / n;
-        let person_weight = weight * n / (n + person_shrink);
-        total += person_weight;
-        weighted += person_weight * record;
+        records.push(PersonRecord {
+            person: credit.person,
+            name: credit.name.clone(),
+            role: credit.role,
+            weight: credit.weight * n / (n + person_shrink),
+            record: earlier.iter().sum::<f32>() / n,
+            films: earlier.len(),
+        });
     }
-    (total > 0.0).then(|| (weighted + estimate_shrink * typical) / (total + estimate_shrink))
+    records
 }
 
 /// The estimators compared, in report order: the typical score for every film (what

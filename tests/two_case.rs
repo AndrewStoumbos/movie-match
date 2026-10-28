@@ -8,8 +8,10 @@ use std::collections::HashMap;
 use common::{movie, profile, rated, Spec, COMEDY, DRAMA, HORROR};
 use movie_match::features::FieldWeights;
 use movie_match::profile::RatedDetails;
+use movie_match::quality::{PersonRecord, Role};
 use movie_match::scoring::{
-    self, audience_share, blend, nudged, Signals, TrackRecords, AUDIENCE_VOTES_HALF,
+    self, audience_share, blend, nudged, Basis, Breakdown, Signals, TrackRecords,
+    AUDIENCE_VOTES_HALF, UNUSUAL_SIMILARITY,
 };
 use movie_match::shift::AudienceShift;
 use movie_match::tmdb::MovieDetails;
@@ -41,6 +43,17 @@ fn director_fan() -> Vec<RatedDetails> {
             rated(&voted(film, audience, 1000), rating)
         })
         .collect()
+}
+
+fn person(name: &str, role: Role, weight: f32, record: f32) -> PersonRecord {
+    PersonRecord {
+        person: 0,
+        name: name.to_string(),
+        role,
+        weight,
+        record,
+        films: 5,
+    }
 }
 
 #[test]
@@ -144,6 +157,14 @@ fn released_films_use_the_audience_and_unreleased_ones_similarity() {
         track_records: Some(TrackRecords {
             typical: 6.5,
             estimates: HashMap::from([(upcoming.id, 7.0)]),
+            people: HashMap::from([(
+                upcoming.id,
+                vec![
+                    person("Steady Actor", Role::Cast, 1.0, 6.6),
+                    person("Big Director", Role::Director, 3.0, 7.2),
+                    person("Weak Writer", Role::Writer, 2.0, 5.5),
+                ],
+            )]),
         }),
     };
 
@@ -153,6 +174,12 @@ fn released_films_use_the_audience_and_unreleased_ones_similarity() {
     let nudge = up.track_record.as_ref().expect("estimate given").nudge;
     assert!((nudge - 0.5).abs() < 1e-5);
     assert!((up.rating - (up.similarity + 0.5)).abs() < 1e-5, "{up:?}");
+    // Named by how far they pull the estimate: 3 × 0.7, then 2 × −1.0; not 1 × 0.1.
+    let named: Vec<&str> = up.track_record.as_ref().map_or(Vec::new(), |t| {
+        t.people.iter().map(|p| p.name.as_str()).collect()
+    });
+    assert_eq!(named, ["Big Director", "Weak Writer"]);
+    assert_eq!(up.neighbours, 3, "the three horror films by director 7");
 
     let out = scoring::explain_with(&p, &signals, &released).breakdown;
     let audience = out.audience.as_ref().expect("votes and a shift");
@@ -169,4 +196,37 @@ fn released_films_use_the_audience_and_unreleased_ones_similarity() {
         assert_eq!(a.score, b.score);
         assert_eq!(a.breakdown.rating, a.breakdown.similarity);
     }
+}
+
+/// A breakdown with only the parts the labels read set.
+fn labelled(audience_share: f32, closest_similarity: f32, neighbours: usize) -> Breakdown {
+    Breakdown {
+        similarity: 7.0,
+        neighbours,
+        closest_similarity,
+        overall_share: 0.2,
+        track_record: None,
+        unreleased: 7.0,
+        audience: None,
+        audience_share,
+        rating: 7.0,
+    }
+}
+
+#[test]
+fn the_audience_share_says_what_a_score_rests_on() {
+    assert_eq!(labelled(0.0, 0.3, 20).basis(), Basis::Estimate);
+    assert_eq!(labelled(0.19, 0.3, 20).basis(), Basis::Estimate);
+    assert_eq!(labelled(0.2, 0.3, 20).basis(), Basis::EarlyAudience);
+    assert_eq!(labelled(0.79, 0.3, 20).basis(), Basis::EarlyAudience);
+    assert_eq!(labelled(0.8, 0.3, 20).basis(), Basis::Audience);
+}
+
+#[test]
+fn films_unlike_anything_rated_are_unusual() {
+    assert!(!labelled(0.0, 0.3, 20).is_unusual());
+    // Twenty neighbours, but even the closest barely shares anything.
+    assert!(labelled(0.0, UNUSUAL_SIMILARITY / 2.0, 20).is_unusual());
+    // Close enough, but only a few rated films share anything at all.
+    assert!(labelled(0.0, 0.3, 4).is_unusual());
 }

@@ -16,6 +16,7 @@ use std::collections::HashMap;
 
 use crate::features;
 use crate::profile::{RatedVector, TasteProfile};
+use crate::quality::PersonRecord;
 use crate::shift::{AudienceShift, ShiftPrediction};
 use crate::tfidf::Vector;
 use crate::tmdb::MovieDetails;
@@ -49,6 +50,34 @@ pub const AUDIENCE_VOTES_HALF: f32 = 100.0;
 /// on MovieLens users that tuning never saw.
 pub const TRACK_RECORD_NUDGE: f32 = 1.0;
 
+/// How many people [`TrackRecordNudge::people`] names.
+pub const TRACK_RECORD_PEOPLE: usize = 2;
+
+/// A film whose closest rated movie is less similar than this is unlike what the
+/// user usually rates (see [`Breakdown::is_unusual`]). On a real 97-rating profile,
+/// a tenth of upcoming and recent films fell below 0.035 and the median was 0.07;
+/// Dune: Part Three's closest (Part Two) was 0.48.
+pub const UNUSUAL_SIMILARITY: f32 = 0.04;
+
+/// Fewer similar rated movies than this also makes a film unusual.
+pub const UNUSUAL_NEIGHBOURS: usize = 5;
+
+/// Below this audience share a score is an [`Basis::Estimate`].
+pub const ESTIMATE_BELOW: f32 = 0.2;
+/// From this audience share on a score is [`Basis::Audience`]-based.
+pub const AUDIENCE_FROM: f32 = 0.8;
+
+/// What a score mostly rests on, by its audience share (see [`audience_share`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Basis {
+    /// Under [`ESTIMATE_BELOW`]: similarity and track record, few or no votes.
+    Estimate,
+    /// In between: early audience votes and the estimate together.
+    EarlyAudience,
+    /// From [`AUDIENCE_FROM`] on: the audience score and the user's shift.
+    Audience,
+}
+
 /// What scoring can use beyond the user's ratings. Without either part (the
 /// default), every film gets its similarity rating alone.
 #[derive(Debug, Clone, Default)]
@@ -68,6 +97,8 @@ pub struct TrackRecords {
     pub typical: f32,
     /// Estimates per TMDB id. A film without one isn't nudged.
     pub estimates: HashMap<u64, f32>,
+    /// The people behind each estimate, per TMDB id (see [`crate::quality::records`]).
+    pub people: HashMap<u64, Vec<PersonRecord>>,
 }
 
 /// How a film's score was put together.
@@ -75,6 +106,13 @@ pub struct TrackRecords {
 pub struct Breakdown {
     /// The similarity rating, 0 to 10 (see [`predict`]).
     pub similarity: f32,
+    /// How many rated movies the similarity rating comes from (see [`predict`]).
+    pub neighbours: usize,
+    /// Cosine similarity of the closest of them, 0 to 1 (0 with none).
+    pub closest_similarity: f32,
+    /// How much of the similarity rating is the user's overall average, 0 to 1
+    /// (see [`Prediction::overall_share`]).
+    pub overall_share: f32,
     /// The track-record nudge, when the film has an estimate.
     pub track_record: Option<TrackRecordNudge>,
     /// The unreleased formula: `similarity` plus the nudge, 0 to 10.
@@ -94,6 +132,9 @@ pub struct TrackRecordNudge {
     pub typical: f32,
     /// What the nudge adds: `TRACK_RECORD_NUDGE × (estimate − typical)`.
     pub nudge: f32,
+    /// The [`TRACK_RECORD_PEOPLE`] people moving the estimate furthest from typical,
+    /// furthest first (see [`PersonRecord::pull`]).
+    pub people: Vec<PersonRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -105,6 +146,26 @@ pub struct AudienceView {
     pub shift: ShiftPrediction,
     /// `score + shift`, 0 to 10.
     pub rating: f32,
+}
+
+impl Breakdown {
+    pub fn basis(&self) -> Basis {
+        if self.audience_share < ESTIMATE_BELOW {
+            Basis::Estimate
+        } else if self.audience_share < AUDIENCE_FROM {
+            Basis::EarlyAudience
+        } else {
+            Basis::Audience
+        }
+    }
+
+    /// Whether the film is unlike anything the user has rated much: its closest
+    /// rated movie is below [`UNUSUAL_SIMILARITY`] or it has fewer than
+    /// [`UNUSUAL_NEIGHBOURS`]. Its similarity rating then says little, which the
+    /// evaluations can't measure, so it's worth flagging.
+    pub fn is_unusual(&self) -> bool {
+        self.closest_similarity < UNUSUAL_SIMILARITY || self.neighbours < UNUSUAL_NEIGHBOURS
+    }
 }
 
 /// The released formula's share of a film's score: `votes / (votes + AUDIENCE_VOTES_HALF)`.
@@ -132,14 +193,20 @@ pub fn nudged(similarity: f32, estimate: Option<f32>, typical: f32) -> f32 {
     (similarity + nudge).clamp(0.0, 10.0)
 }
 
-/// Puts `movie`'s score together from its similarity rating and `signals`.
-pub fn breakdown(similarity: f32, movie: &MovieDetails, signals: &Signals) -> Breakdown {
+/// Puts `movie`'s score together from its similarity `prediction` and `signals`.
+pub fn breakdown(prediction: &Prediction, movie: &MovieDetails, signals: &Signals) -> Breakdown {
+    let similarity = prediction.rating;
     let track_record = signals.track_records.as_ref().and_then(|records| {
         let estimate = *records.estimates.get(&movie.id)?;
+        let typical = records.typical;
+        let mut people = records.people.get(&movie.id).cloned().unwrap_or_default();
+        people.sort_by(|a, b| b.pull(typical).abs().total_cmp(&a.pull(typical).abs()));
+        people.truncate(TRACK_RECORD_PEOPLE);
         Some(TrackRecordNudge {
             estimate,
-            typical: records.typical,
-            nudge: TRACK_RECORD_NUDGE * (estimate - records.typical),
+            typical,
+            nudge: TRACK_RECORD_NUDGE * (estimate - typical),
+            people,
         })
     });
     let unreleased = nudged(
@@ -166,6 +233,9 @@ pub fn breakdown(similarity: f32, movie: &MovieDetails, signals: &Signals) -> Br
     );
     Breakdown {
         similarity,
+        neighbours: prediction.neighbours.len(),
+        closest_similarity: prediction.neighbours.first().map_or(0.0, |n| n.similarity),
+        overall_share: prediction.overall_share,
         track_record,
         unreleased,
         audience,
@@ -316,7 +386,7 @@ pub fn score_detailed_with<'a>(
         Some(liked) => reasons(profile, movie, &candidate, &liked.vector),
         None => Vec::new(),
     };
-    let breakdown = breakdown(prediction.rating, movie, signals);
+    let breakdown = breakdown(&prediction, movie, signals);
     Match {
         score: to_score(breakdown.rating),
         closest_liked,
@@ -381,7 +451,7 @@ pub fn explain_with(
                 .collect(),
         })
         .collect();
-    let breakdown = breakdown(prediction.rating, movie, signals);
+    let breakdown = breakdown(&prediction, movie, signals);
     Explanation {
         score: to_score(breakdown.rating),
         predicted_rating: breakdown.rating,
