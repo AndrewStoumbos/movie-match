@@ -18,7 +18,10 @@ movies the user likes. See README.md for the roadmap.
   `AUDIENCE_VOTES_HALF`). Released: audience score + `AudienceShift` prediction.
   Unreleased: the similarity rating + `TRACK_RECORD_NUDGE` × (track-record estimate −
   typical) (`nudged`). `Signals` carries the shift and `TrackRecords`; the `_with`
-  functions take them, the plain ones use similarity alone. The similarity rating
+  functions take them, the plain ones use similarity alone. `Breakdown::basis` labels a
+  score Estimate / EarlyAudience / Audience by audience share (`ESTIMATE_BELOW`,
+  `AUDIENCE_FROM`); `is_unusual` flags films whose closest rated movie is below
+  `UNUSUAL_SIMILARITY` (chosen from real data) or with few neighbours. The similarity rating
   comes from the movie's 20 most similar rated movies (`predict`: weight = (similarity / closest)^2
   (`SIMILARITY_POWER`), whatever the rating; movies tied for the 20th place are all kept and
   split the places left, so file order never matters; the weighted average is blended with the overall
@@ -49,7 +52,8 @@ movies the user likes. See README.md for the roadmap.
 - `src/recommend.rs` per-user steps: `resolve` ratings to TMDB (`Resolved::ids` per input,
   in order; a given id TMDB answers 404 for becomes unmatched with id `None`, so one
   stale id can't fail every run), `rank_upcoming` and `explain_movie` (both fit the
-  `AudienceShift` and fetch the catalog's track records, cached a month). Futures must stay `Send` (the app runs them
+  `AudienceShift` and fetch the catalog's track records, cached a month;
+  `rank_upcoming_reporting` also reports each `Stage` for the app's progress text). Futures must stay `Send` (the app runs them
   on a multi-threaded runtime): stream over owned items, not references.
 - I/O lives only in `tmdb/`, `cache.rs`, `fetch.rs`, `catalog.rs`, `recommend.rs`.
 - `src/tmdb/`     TMDB API client (`mod.rs`) and response types (`models.rs`)

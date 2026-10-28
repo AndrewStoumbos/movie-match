@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use common::{movie, Spec};
 use movie_match::features::FieldWeights;
 use movie_match::quality::{
-    credits, estimate, estimate_with, evaluate_track_record, EstimateSettings, Role,
+    credits, estimate, estimate_with, evaluate_track_record, records, EstimateSettings, Role,
     MIN_TRUTH_VOTES,
 };
 use movie_match::tmdb::{CreditedFilm, MovieDetails, PersonCredits};
@@ -134,6 +134,7 @@ fn credits_list_each_role_once_with_its_weight() {
 
     assert!(list.contains(&movie_match::quality::Credit {
         person: 7,
+        name: "Director 7".into(),
         role: Role::Director,
         weight: weights.director
     }));
@@ -230,4 +231,51 @@ fn tuning_splits_films_and_keeps_check_half_unseen() {
     assert!(tuned.mae <= defaults.mae, "{tuned:?} vs {defaults:?}");
     assert!(defaults.mae < typical.mae);
     assert_eq!(report.best.estimate_shrink, 0.0);
+}
+
+#[test]
+fn records_name_each_person_and_add_up_to_the_estimate() {
+    // Director 7 (weight 3) averages 8 over two films; actor 9 (weight 2) has 5.
+    let mut target = directed(10, 7, "2015-06-01");
+    target
+        .credits
+        .cast
+        .push(movie_match::tmdb::models::CastMember {
+            id: 9,
+            name: "Actor 9".into(),
+            order: 0,
+        });
+    let filmographies = HashMap::from([
+        (
+            7,
+            vec![
+                film(1, "2010-01-01", 8.0, 100_000),
+                film(2, "2012-01-01", 8.0, 100_000),
+            ],
+        ),
+        (9, vec![film(3, "2011-01-01", 5.0, 100_000)]),
+    ]);
+    let used = credits(&target, &FieldWeights::default(), 3);
+
+    let found = records(&target, &used, &filmographies, 6.0);
+    let summary: Vec<_> = found
+        .iter()
+        .map(|r| (r.name.as_str(), r.role, r.films))
+        .collect();
+    assert_eq!(
+        summary,
+        [
+            ("Director 7", Role::Director, 2),
+            ("Actor 9", Role::Cast, 1)
+        ]
+    );
+    let total: f32 = found.iter().map(|r| r.weight).sum();
+    let weighted: f32 = found.iter().map(|r| r.weight * r.record).sum();
+    let estimated = estimate(&target, &used, &filmographies, 6.0).expect("records");
+    assert!((weighted / total - estimated).abs() < 1e-5);
+    // The director pulls up by 3 × 2, the actor down by 2 × 1.
+    assert!(
+        found[0].pull(6.0) > 5.9 && found[1].pull(6.0) < -1.9,
+        "{found:?}"
+    );
 }

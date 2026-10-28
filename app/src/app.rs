@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use eframe::egui::{self, Align, Align2, Color32, FontId, Layout, RichText};
@@ -11,8 +11,9 @@ use movie_match::catalog::CatalogOptions;
 use movie_match::fetch::Fetcher;
 use movie_match::import;
 use movie_match::profile::{self, RatedMovie, DISLIKED_UP_TO, LIKED_FROM};
-use movie_match::recommend::{self, Options, Ranking};
-use movie_match::scoring::{Explanation, Ranked};
+use movie_match::quality::Role;
+use movie_match::recommend::{self, Options, Ranking, Stage};
+use movie_match::scoring::{AudienceView, Basis, Breakdown, Explanation, Ranked, TrackRecordNudge};
 use movie_match::tmdb::{MovieDetails, Region, TmdbClient};
 use tokio::runtime::Runtime;
 
@@ -91,6 +92,8 @@ pub struct MovieMatchApp {
 
     ranking: Option<Ranking>,
     ranking_job: Option<Job<Ranking>>,
+    /// The step the ranking job is on, set from its background thread.
+    ranking_stage: Arc<Mutex<Option<Stage>>>,
     filter: String,
     show: ShowCount,
 
@@ -137,6 +140,7 @@ impl MovieMatchApp {
             notice,
             ranking: None,
             ranking_job: None,
+            ranking_stage: Arc::default(),
             filter: String::new(),
             show: ShowCount::Top20,
             explain_query: String::new(),
@@ -210,8 +214,19 @@ impl MovieMatchApp {
             return;
         };
         let options = self.options();
+        let stage = Arc::clone(&self.ranking_stage);
+        if let Ok(mut current) = stage.lock() {
+            *current = None;
+        }
+        let repaint = ctx.clone();
+        let report = move |now: Stage| {
+            if let Ok(mut current) = stage.lock() {
+                *current = Some(now);
+            }
+            repaint.request_repaint();
+        };
         self.ranking_job = Some(Job::spawn(&self.runtime, ctx, async move {
-            recommend::rank_upcoming(&fetcher, &movies, &options).await
+            recommend::rank_upcoming_reporting(&fetcher, &movies, &options, report).await
         }));
     }
 
@@ -417,15 +432,29 @@ impl MovieMatchApp {
         }
     }
 
-    fn busy_text(&self) -> Option<&'static str> {
+    fn busy_text(&self) -> Option<String> {
         if self.ranking_job.is_some() {
-            Some("Ranking upcoming movies…")
+            Some(self.stage_text())
         } else if self.explain_job.is_some() {
-            Some("Working out a score…")
+            Some("Working out a score…".into())
         } else if self.checking.is_some() {
-            Some("Checking that TMDB id…")
+            Some("Checking that TMDB id…".into())
         } else {
             None
+        }
+    }
+
+    /// What the ranking job is doing right now.
+    fn stage_text(&self) -> String {
+        let stage = self.ranking_stage.lock().ok().and_then(|s| *s);
+        match stage {
+            None | Some(Stage::Catalog) => "Listing upcoming and recent movies…".into(),
+            Some(Stage::Ratings) => "Matching your ratings to TMDB…".into(),
+            Some(Stage::TrackRecords { people }) => format!(
+                "Looking up {} cast and crew's earlier films…",
+                thousands(u32::try_from(people).unwrap_or(u32::MAX))
+            ),
+            Some(Stage::Scoring) => "Scoring…".into(),
         }
     }
 
@@ -589,10 +618,10 @@ impl MovieMatchApp {
             } else {
                 ui.horizontal(|ui| {
                     ui.spinner();
-                    ui.label(
-                        "Matching your ratings and ranking upcoming and recent movies. \
-                         The first run can take a minute; later runs are quick.",
-                    );
+                    ui.label(format!(
+                        "{} The first run can take a minute or two; later runs are quick.",
+                        self.stage_text()
+                    ));
                 });
             }
             return action;
@@ -634,7 +663,7 @@ impl MovieMatchApp {
                 let mut any = false;
                 for (i, ranked) in shown.enumerate() {
                     any = true;
-                    if movie_card(ui, i + 1, ranked, recent) {
+                    if movie_card(ui, i + 1, ranked) {
                         action = Some(Action::Explain(ranked.movie.title.clone()));
                     }
                 }
@@ -1026,7 +1055,7 @@ fn section(ui: &mut egui::Ui, title: &str, add_contents: impl FnOnce(&mut egui::
 /// One ranked movie. Returns `true` when "Why this score?" was clicked.
 /// One ranked movie. With `recent`, the audience score is always mentioned (or that
 /// there isn't one yet); upcoming films only show it when early votes exist.
-fn movie_card(ui: &mut egui::Ui, position: usize, ranked: &Ranked, recent: bool) -> bool {
+fn movie_card(ui: &mut egui::Ui, position: usize, ranked: &Ranked) -> bool {
     let mut explain = false;
     egui::Frame::group(ui.style())
         .inner_margin(10.0)
@@ -1044,21 +1073,18 @@ fn movie_card(ui: &mut egui::Ui, position: usize, ranked: &Ranked, recent: bool)
                             score_badge(ui, ranked.score);
                         });
                     });
-                    match (ranked.movie.audience_rating(), ranked.movie.vote_count) {
-                        (Some(score), Some(votes)) => {
-                            let label = if recent { "Audience" } else { "Early audience" };
-                            ui.label(
-                                RichText::new(format!(
-                                    "{label} {score:.1}/10 · {} votes",
-                                    thousands(votes)
-                                ))
-                                .weak(),
-                            );
+                    let breakdown = &ranked.breakdown;
+                    ui.horizontal(|ui| {
+                        basis_chip(ui, breakdown);
+                        if breakdown.is_unusual() {
+                            unusual_chip(ui);
                         }
-                        _ if recent => {
-                            ui.label(RichText::new("No audience ratings yet").weak());
+                    });
+                    let basis = breakdown.basis();
+                    if let Some(audience) = &breakdown.audience {
+                        if basis != Basis::Estimate {
+                            ui.label(audience_text(audience));
                         }
-                        _ => {}
                     }
                     if let Some((title, rating)) = &ranked.closest_liked {
                         let because = if ranked.reasons.is_empty() {
@@ -1070,6 +1096,13 @@ fn movie_card(ui: &mut egui::Ui, position: usize, ranked: &Ranked, recent: bool)
                             "Like {title} (you rated {}/10){because}",
                             rating_text(*rating)
                         ));
+                    }
+                    if basis != Basis::Audience {
+                        if let Some(text) =
+                            breakdown.track_record.as_ref().and_then(track_record_text)
+                        {
+                            ui.label(text);
+                        }
                     }
                     if let Some((title, rating)) = &ranked.closest_disliked {
                         ui.label(
@@ -1119,31 +1152,9 @@ fn explanation_view(ui: &mut egui::Ui, movie: &MovieDetails, explanation: &Expla
     });
     ui.add_space(10.0);
     section(ui, "How the score was predicted", |ui| {
-        let breakdown = &explanation.breakdown;
-        let share = breakdown.audience_share * 100.0;
-        if let Some(audience) = &breakdown.audience {
-            ui.label(format!(
-                "{share:.0}% from the TMDB audience: {:.1}/10 from {} votes, {:+.1} for how you \
-                 usually differ from it, so {:.1}.",
-                audience.score,
-                thousands(audience.votes),
-                audience.shift.total(),
-                audience.rating
-            ));
-        }
-        let nudge = breakdown.track_record.as_ref().map_or(String::new(), |t| {
-            format!(
-                ", {:+.1} for its cast and crew's earlier films ({:.1} vs a typical {:.1})",
-                t.nudge, t.estimate, t.typical
-            )
-        });
-        ui.label(format!(
-            "{:.0}% from movies you've rated: similarity rating {:.1}{nudge}, so {:.1}.",
-            100.0 - share,
-            breakdown.similarity,
-            breakdown.unreleased
-        ));
-        ui.add_space(4.0);
+        breakdown_view(ui, &explanation.breakdown);
+    });
+    section(ui, "Similarity rating", |ui| {
         if explanation.neighbours.is_empty() {
             ui.label(format!(
                 "Nothing you've rated is similar, so the similarity rating is your overall \
@@ -1187,6 +1198,202 @@ fn explanation_view(ui: &mut egui::Ui, movie: &MovieDetails, explanation: &Expla
             ui.add_space(4.0);
         }
     });
+}
+
+/// The score's parts: the released formula (audience + the user's shift), the
+/// unreleased one (similarity + track record), and how they blend.
+fn breakdown_view(ui: &mut egui::Ui, breakdown: &Breakdown) {
+    ui.horizontal(|ui| {
+        basis_chip(ui, breakdown);
+        if breakdown.is_unusual() {
+            unusual_chip(ui);
+        }
+    });
+    let share = breakdown.audience_share;
+    ui.add(
+        egui::ProgressBar::new(share)
+            .desired_width(320.0)
+            .text(format!(
+                "{:.0}% audience · {:.0}% your similar movies",
+                share * 100.0,
+                (1.0 - share) * 100.0
+            )),
+    );
+    ui.add_space(6.0);
+
+    if let Some(audience) = &breakdown.audience {
+        ui.label(RichText::new("From the audience").strong());
+        ui.label(format!(
+            "TMDB audience {:.1}/10 from {} votes",
+            audience.score,
+            thousands(audience.votes)
+        ));
+        let shift = &audience.shift;
+        let reasons: Vec<String> = shift
+            .reasons
+            .iter()
+            .map(|(label, value)| format!("{label} {value:+.1}"))
+            .collect();
+        ui.label(format!(
+            "{:+.1} for you: you usually rate {:+.1} vs the audience{}{}",
+            shift.total(),
+            shift.average,
+            if reasons.is_empty() { "" } else { "; " },
+            reasons.join(", ")
+        ));
+        ui.label(format!("= {:.1}", audience.rating));
+        ui.add_space(6.0);
+    }
+
+    ui.label(RichText::new("From your similar movies").strong());
+    ui.label(format!(
+        "Similarity rating {:.1}/10 from {} movies you've rated (below)",
+        breakdown.similarity, breakdown.neighbours
+    ));
+    match &breakdown.track_record {
+        Some(t) => {
+            ui.label(format!(
+                "{:+.1} for its cast and crew: their earlier films average {:.1}, a typical \
+                 film {:.1}",
+                t.nudge, t.estimate, t.typical
+            ));
+            for person in &t.people {
+                ui.label(
+                    RichText::new(format!(
+                        "  {} {}: {:.1} over {} earlier films",
+                        role_word(person.role),
+                        person.name,
+                        person.record,
+                        person.films
+                    ))
+                    .weak(),
+                );
+            }
+        }
+        None => {
+            ui.label(
+                RichText::new("No track record: its cast and crew have no earlier films").weak(),
+            );
+        }
+    }
+    ui.label(format!("= {:.1}", breakdown.unreleased));
+
+    if breakdown.audience.is_some() {
+        ui.add_space(6.0);
+        ui.label(format!(
+            "Blended by votes: {:.0}% × {:.1} + {:.0}% × {:.1} = {:.1}",
+            share * 100.0,
+            breakdown.audience.as_ref().map_or(0.0, |a| a.rating),
+            (1.0 - share) * 100.0,
+            breakdown.unreleased,
+            breakdown.rating
+        ));
+    }
+    if breakdown.is_unusual() {
+        ui.add_space(4.0);
+        ui.label(RichText::new(UNUSUAL_HINT).weak());
+    }
+}
+
+const UNUSUAL_HINT: &str = "Little you've rated is like this film, so the similar-movies part \
+     says less than usual. Treat the score as a rough guess.";
+
+/// What the score mostly rests on: an estimate, early votes or the audience.
+fn basis_chip(ui: &mut egui::Ui, breakdown: &Breakdown) {
+    let votes = breakdown.audience.as_ref().map_or(0, |a| a.votes);
+    let (text, hover) = match breakdown.basis() {
+        Basis::Estimate => (
+            "Estimate".to_string(),
+            "No or very few audience ratings yet: predicted from the movies you've rated and \
+             its cast and crew's earlier films",
+        ),
+        Basis::EarlyAudience => (
+            format!("Early audience · {} votes", thousands(votes)),
+            "Partly from its first audience ratings, partly estimated",
+        ),
+        Basis::Audience => (
+            format!("Based on {} audience ratings", thousands(votes)),
+            "Mostly its audience score, adjusted for how you usually differ from the audience",
+        ),
+    };
+    chip(ui, &text, Color32::from_rgb(70, 110, 160)).on_hover_text(hover);
+}
+
+fn unusual_chip(ui: &mut egui::Ui) {
+    chip(
+        ui,
+        "Not your usual kind of film",
+        Color32::from_rgb(150, 100, 40),
+    )
+    .on_hover_text(UNUSUAL_HINT);
+}
+
+fn chip(ui: &mut egui::Ui, text: &str, fill: Color32) -> egui::Response {
+    egui::Frame::new()
+        .fill(fill)
+        .corner_radius(4.0)
+        .inner_margin(egui::Margin::symmetric(6, 1))
+        .show(ui, |ui| {
+            ui.label(RichText::new(text).size(12.0).color(Color32::WHITE));
+        })
+        .response
+}
+
+/// "Audience 7.9, +0.5 for you: genre Science Fiction +0.3, director … +0.2"
+fn audience_text(audience: &AudienceView) -> String {
+    let reasons: Vec<String> = audience
+        .shift
+        .reasons
+        .iter()
+        .map(|(label, value)| format!("{label} {value:+.1}"))
+        .collect();
+    let because = if reasons.is_empty() {
+        String::new()
+    } else {
+        format!(": {}", reasons.join(", "))
+    };
+    format!(
+        "Audience {:.1}, {:+.1} for you{because}",
+        audience.score,
+        audience.shift.total()
+    )
+}
+
+/// "Director Denis Villeneuve's earlier films average 7.8 (+0.4)", or `None` when
+/// nobody is named.
+fn track_record_text(track_record: &TrackRecordNudge) -> Option<String> {
+    let mut people = track_record.people.iter();
+    let first = people.next()?;
+    let mut text = format!(
+        "{} {}'s earlier films average {:.1}",
+        capitalized(role_word(first.role)),
+        first.name,
+        first.record
+    );
+    for person in people {
+        text += &format!(
+            "; {} {}'s {:.1}",
+            role_word(person.role),
+            person.name,
+            person.record
+        );
+    }
+    Some(format!("{text} ({:+.1})", track_record.nudge))
+}
+
+fn role_word(role: Role) -> &'static str {
+    match role {
+        Role::Director => "director",
+        Role::Writer => "writer",
+        Role::Cast => "actor",
+    }
+}
+
+fn capitalized(word: &str) -> String {
+    let mut chars = word.chars();
+    chars
+        .next()
+        .map_or(String::new(), |c| c.to_uppercase().chain(chars).collect())
 }
 
 fn poster(ui: &mut egui::Ui, movie: &MovieDetails) {
@@ -1233,7 +1440,9 @@ fn score_badge(ui: &mut egui::Ui, score: u8) {
         })
         .response
         .on_hover_text(
-            "Your predicted rating × 10, from the movies you've rated that are most like it",
+            "Your predicted rating × 10: from the movies you've rated that are most like it \
+             and its cast and crew's earlier films, or once people have seen it, from the \
+             audience score adjusted for how you usually differ from it",
         );
 }
 
