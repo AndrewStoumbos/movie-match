@@ -66,8 +66,10 @@ movies the user likes. See README.md for the roadmap.
 
 - `server/`       server crate `movie-match-server` (axum): holds `TMDB_API_KEY` and answers
   the app's TMDB requests under `/tmdb` (`TmdbClient::via_server`, which sends no key),
-  so users need no key. Only the paths the app uses pass (`max_age`); TMDB statuses pass
-  through; 200s are cached for every user in `data/server-cache/`. Listens on
+  so users need no key. Only the paths and query parameters `TmdbClient` sends pass
+  (`allowed`; keep it in step with the client), anything else is 403 (never 404, which
+  the app reads as "no such movie"); TMDB statuses pass through; 200s are cached for every
+  user in `data/server-cache/`, each entry holding its exact path and parameters. Listens on
   `127.0.0.1:8765` by default; no rate limiting yet, so don't expose it beyond the machine
   without adding some.
 

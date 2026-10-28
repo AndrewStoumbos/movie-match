@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use axum::extract::{Path, RawQuery, State};
+use axum::extract::{Path, Query, RawQuery, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::get;
@@ -31,8 +31,9 @@ async fn serve(app: Router) -> SocketAddr {
     addr
 }
 
-/// A stand-in TMDB with movie 7 and nothing else, and a Movie Match server in front
-/// of it caching in `cache_dir`. Returns the server's URL and what TMDB saw.
+/// A stand-in TMDB with movie 7, a search that names its one result after the query,
+/// and nothing else, plus a Movie Match server in front of it caching in
+/// `cache_dir`. Returns the server's URL and what TMDB saw.
 async fn start(cache_dir: Option<&std::path::Path>) -> (String, Arc<Seen>) {
     let seen = Arc::new(Seen::default());
     let tmdb = Router::new()
@@ -47,6 +48,23 @@ async fn start(cache_dir: Option<&std::path::Path>) -> (String, Arc<Seen>) {
                     } else {
                         StatusCode::NOT_FOUND.into_response()
                     }
+                },
+            ),
+        )
+        .route(
+            "/search/movie",
+            get(
+                |State(seen): State<Arc<Seen>>, Query(q): Query<Vec<(String, String)>>| async move {
+                    seen.requests.fetch_add(1, Ordering::SeqCst);
+                    let query = q
+                        .iter()
+                        .find(|(k, _)| k == "query")
+                        .map(|(_, v)| v.clone())
+                        .unwrap_or_default();
+                    let title = serde_json::to_string(&query).unwrap_or_default();
+                    format!(
+                        r#"{{"page":1,"results":[{{"id":1,"title":{title}}}],"total_pages":1,"total_results":1}}"#
+                    )
                 },
             ),
         )
@@ -120,44 +138,95 @@ async fn tmdb_404s_pass_through_uncached() {
     assert_eq!(seen.requests.load(Ordering::SeqCst), 2);
 }
 
+/// The status the server answers for `path_and_query`.
+async fn status(url: &str, path_and_query: &str) -> reqwest::StatusCode {
+    http()
+        .get(format!("{url}{path_and_query}"))
+        .send()
+        .await
+        .expect("request")
+        .status()
+}
+
 #[tokio::test]
 async fn requests_the_app_never_makes_are_refused() {
     let (url, seen) = start(None).await;
 
-    for path in [
+    for refused in [
+        // Paths it doesn't use.
         "/tmdb/account/1",
         "/tmdb/movie/upcoming",
         "/tmdb/movie/7/videos",
         "/tmdb/movie/abc",
-        "/other",
+        // Parameters it doesn't send, or sends only with one value, or only once.
+        "/tmdb/movie/7?append_to_response=images,videos,reviews",
+        "/tmdb/movie/7?append_to_response=keywords,credits&x=nonce",
+        "/tmdb/movie/popular?page=1&page=2",
+        "/tmdb/discover/movie?sort_by=revenue.desc",
+        "/tmdb/person/3/movie_credits?language=fr",
+        // A key of its own.
+        "/tmdb/movie/7?append_to_response=keywords,credits&api_key=someone-elses",
     ] {
-        let status = http()
-            .get(format!("{url}{path}"))
-            .send()
-            .await
-            .expect("request")
-            .status();
-        assert_eq!(status, reqwest::StatusCode::NOT_FOUND, "{path}");
+        assert_eq!(
+            status(&url, refused).await,
+            reqwest::StatusCode::FORBIDDEN,
+            "{refused}"
+        );
     }
     assert_eq!(seen.requests.load(Ordering::SeqCst), 0);
+    // The app's own shape still passes.
+    let allowed = "/tmdb/movie/7?append_to_response=keywords,credits";
+    assert!(status(&url, allowed).await.is_success());
 }
 
 #[tokio::test]
-async fn a_key_sent_to_the_server_is_replaced_by_its_own() {
-    let (url, seen) = start(None).await;
+async fn a_refused_request_is_an_error_not_a_missing_movie() {
+    let (url, _) = start(None).await;
+    // A client that sends its own key: the server refuses it, as it would any
+    // request shape it doesn't know.
+    let mismatched =
+        TmdbClient::with_base_url(http(), "client-key".to_string(), format!("{url}/tmdb"));
 
-    let status = http()
-        .get(format!("{url}/tmdb/movie/7?api_key=someone-elses"))
+    let err = mismatched
+        .movie_details(7)
+        .await
+        .expect_err("refused by the server");
+
+    assert!(!is_not_found(&err), "{err:#}");
+    assert!(format!("{err:#}").contains("403"), "{err:#}");
+}
+
+#[tokio::test]
+async fn requests_that_print_alike_are_cached_apart() {
+    let dir = temp_dir("collision");
+    let (url, seen) = start(Some(&dir)).await;
+
+    // One year value containing "&query=Alien", then the two parameters it looks
+    // like once sorted. The second must not get the first's cached answer.
+    let one_value = http()
+        .get(format!(
+            "{url}/tmdb/search/movie?primary_release_year=1979%26query%3DAlien"
+        ))
         .send()
         .await
         .expect("request")
-        .status();
+        .text()
+        .await
+        .expect("body");
+    let two_params = http()
+        .get(format!(
+            "{url}/tmdb/search/movie?primary_release_year=1979&query=Alien"
+        ))
+        .send()
+        .await
+        .expect("request")
+        .text()
+        .await
+        .expect("body");
+    let _ = std::fs::remove_dir_all(&dir);
 
-    assert!(status.is_success());
-    let queries = seen.queries.lock().unwrap();
-    assert!(!queries[0].contains("someone-elses"), "{queries:?}");
-    assert!(
-        queries[0].contains(&format!("api_key={SERVER_KEY}")),
-        "{queries:?}"
-    );
+    // The stand-in names its result after the query, and the first request had none.
+    assert!(one_value.contains(r#""title":"""#), "{one_value}");
+    assert!(two_params.contains(r#""title":"Alien""#), "{two_params}");
+    assert_eq!(seen.requests.load(Ordering::SeqCst), 2);
 }

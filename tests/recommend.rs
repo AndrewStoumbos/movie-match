@@ -6,7 +6,7 @@ use std::fs;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common::tmdb::{local_client, serve_once, serve_once_recording, serve_with};
@@ -18,7 +18,9 @@ use movie_match::fetch::{
     MAX_FILMOGRAPHY_FAILURES,
 };
 use movie_match::profile::RatedMovie;
-use movie_match::recommend::{explain_movie, rank_upcoming, resolve, Options, Resolved};
+use movie_match::recommend::{
+    explain_movie, rank_upcoming, rank_upcoming_reporting, resolve, Options, Resolved, Stage,
+};
 use movie_match::tmdb::{CreditedFilm, MovieDetails};
 
 /// A fresh, empty folder for one test.
@@ -343,5 +345,58 @@ async fn filmography_requests_stop_after_repeated_failures() {
     assert!(
         made < MAX_FILMOGRAPHY_FAILURES + CONCURRENT_REQUESTS,
         "{made} requests"
+    );
+}
+
+#[tokio::test]
+async fn ranking_reports_each_stage_in_order_with_the_people_looked_up() {
+    let dir = temp_dir("stages");
+    // Two directors, one of whom also acts: two people to look up, not three.
+    let upcoming = movie(
+        "Upcoming",
+        Spec {
+            id: 438631,
+            directors: vec![7, 8],
+            cast: vec![7],
+            ..Spec::default()
+        },
+    );
+    let cache = cache_with_upcoming(&dir, std::slice::from_ref(&upcoming));
+    let earlier = CreditedFilm {
+        id: 1,
+        release_date: Some("2000-01-01".into()),
+        vote_average: Some(7.0),
+        vote_count: Some(1000),
+    };
+    for person in [7, 8] {
+        cache
+            .put(&filmography_cache_key(person), &vec![earlier.clone()])
+            .expect("write filmography");
+    }
+    // Everything is cached, so any request reaching this server is a failure.
+    let fetcher = Fetcher::new(
+        local_client(serve_with(|_| SERVER_ERROR.to_string())),
+        Some(cache),
+    );
+    let stages = Mutex::new(Vec::new());
+
+    let ranking = rank_upcoming_reporting(&fetcher, &[], &Options::default(), |stage| {
+        if let Ok(mut stages) = stages.lock() {
+            stages.push(stage);
+        }
+    })
+    .await;
+    let _ = fs::remove_dir_all(&dir);
+
+    ranking.expect("ranks from the cache");
+    let stages = stages.into_inner().expect("no panics while reporting");
+    assert_eq!(
+        stages,
+        [
+            Stage::Catalog,
+            Stage::Ratings,
+            Stage::TrackRecords { people: 2 },
+            Stage::Scoring,
+        ]
     );
 }

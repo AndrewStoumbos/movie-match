@@ -2411,6 +2411,7 @@ dependencies = [
  "movie-match",
  "reqwest",
  "serde",
+ "serde_json",
  "tokio",
 ]
 

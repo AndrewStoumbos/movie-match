@@ -59,23 +59,59 @@ pub fn router(server: Arc<Server>) -> Router {
         .with_state(server)
 }
 
-/// How long TMDB's answer for `path` is reused, or `None` for a request the app never
-/// makes, which the server refuses so it can't be used for the rest of TMDB's API.
-pub fn max_age(path: &str) -> Option<Duration> {
+/// A query parameter the app sends: its name, and its value when that's always
+/// the same.
+type Param = (&'static str, Option<&'static str>);
+
+const POPULAR: &[Param] = &[("page", None)];
+const DISCOVER: &[Param] = &[
+    ("sort_by", Some("popularity.desc")),
+    ("include_adult", Some("false")),
+    ("include_video", Some("false")),
+    ("page", None),
+    ("vote_count.gte", None),
+    ("primary_release_date.gte", None),
+    ("primary_release_date.lte", None),
+    ("region", None),
+    ("with_release_type", Some("2|3")),
+    ("release_date.gte", None),
+    ("release_date.lte", None),
+];
+const SEARCH: &[Param] = &[("query", None), ("primary_release_year", None)];
+const DETAILS: &[Param] = &[("append_to_response", Some("keywords,credits"))];
+
+/// How long TMDB's answer to `path` with `params` is reused, or `None` for a request
+/// the app never makes: another path, a parameter `TmdbClient` doesn't send (an API
+/// key included), a repeated one, or a fixed one with another value. Refusing those
+/// keeps the server from serving the rest of TMDB's API on its key, and from caching
+/// endless variants of one request.
+pub fn allowed(path: &str, params: &[(String, String)]) -> Option<Duration> {
     let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
     let number = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
-    match parts.as_slice() {
-        ["movie", "popular"] | ["discover", "movie"] | ["search", "movie"] => Some(CATALOG_MAX_AGE),
-        ["movie", id] if number(id) => Some(DETAILS_MAX_AGE),
-        ["person", id, "movie_credits"] if number(id) => Some(FILMOGRAPHY_MAX_AGE),
-        _ => None,
-    }
+    let (max_age, known) = match parts.as_slice() {
+        ["movie", "popular"] => (CATALOG_MAX_AGE, POPULAR),
+        ["discover", "movie"] => (CATALOG_MAX_AGE, DISCOVER),
+        ["search", "movie"] => (CATALOG_MAX_AGE, SEARCH),
+        ["movie", id] if number(id) => (DETAILS_MAX_AGE, DETAILS),
+        ["person", id, "movie_credits"] if number(id) => (FILMOGRAPHY_MAX_AGE, &[][..]),
+        _ => return None,
+    };
+    let all_known = params.iter().enumerate().all(|(i, (name, value))| {
+        let once = !params[..i].iter().any(|(earlier, _)| earlier == name);
+        let fits = known
+            .iter()
+            .any(|(k, fixed)| k == name && fixed.is_none_or(|f| f == value));
+        once && fits
+    });
+    all_known.then_some(max_age)
 }
 
-/// A cached answer, with the request it answers so a key collision is a miss.
+/// A cached answer, with the exact request it answers, so a hash collision between
+/// two requests is a miss rather than one user's answer served for another's.
 #[derive(Serialize, Deserialize)]
 struct Cached {
-    request: String,
+    path: String,
+    params: Vec<(String, String)>,
     body: String,
 }
 
@@ -85,23 +121,23 @@ async fn tmdb(
     Query(query): Query<Vec<(String, String)>>,
 ) -> Response {
     let path = format!("/{path}");
-    let Some(max_age) = max_age(&path) else {
-        return (StatusCode::NOT_FOUND, "not a request Movie Match makes").into_response();
+    let mut params = query;
+    // 403, not 404: the app reads a 404 as "TMDB has no such movie", which would
+    // hide a client and server that disagree about what's allowed.
+    let Some(max_age) = allowed(&path, &params) else {
+        return (StatusCode::FORBIDDEN, "not a request Movie Match makes").into_response();
     };
-    // The app's parameters minus any key, in a fixed order so equal requests share
-    // one cache entry.
-    let mut params: Vec<(String, String)> =
-        query.into_iter().filter(|(k, _)| k != "api_key").collect();
+    // In a fixed order so equal requests share one cache entry.
     params.sort();
-    let request = params
-        .iter()
-        .fold(path.clone(), |acc, (k, v)| format!("{acc}&{k}={v}"));
-    let key = format!("tmdb-v1/{:016x}", fnv1a(&request));
+    // Hashed from the JSON form, which escapes every name and value, so different
+    // requests can't run together into the same text.
+    let request = serde_json::to_string(&(&path, &params)).unwrap_or_default();
+    let key = format!("tmdb-v2/{:016x}", fnv1a(&request));
     if let Some(cached) = server
         .cache
         .as_ref()
         .and_then(|c| c.get::<Cached>(&key, max_age))
-        .filter(|c| c.request == request)
+        .filter(|c| c.path == path && c.params == params)
     {
         return json(cached.body);
     }
@@ -141,7 +177,8 @@ async fn tmdb(
         cache.put_or_warn(
             &key,
             &Cached {
-                request,
+                path,
+                params,
                 body: body.clone(),
             },
         );
