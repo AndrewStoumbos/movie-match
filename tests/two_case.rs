@@ -168,7 +168,7 @@ fn released_films_use_the_audience_and_unreleased_ones_similarity() {
         }),
     };
 
-    let up = scoring::explain_with(&p, &signals, &upcoming).breakdown;
+    let up = scoring::explain(&p, &signals, &upcoming).breakdown;
     assert!(up.audience.is_none());
     assert_eq!(up.audience_share, 0.0);
     let nudge = up.track_record.as_ref().expect("estimate given").nudge;
@@ -181,7 +181,7 @@ fn released_films_use_the_audience_and_unreleased_ones_similarity() {
     assert_eq!(named, ["Big Director", "Weak Writer"]);
     assert_eq!(up.neighbours, 3, "the three horror films by director 7");
 
-    let out = scoring::explain_with(&p, &signals, &released).breakdown;
+    let out = scoring::explain(&p, &signals, &released).breakdown;
     let audience = out.audience.as_ref().expect("votes and a shift");
     assert!(out.audience_share > 0.99);
     assert!((audience.rating - (5.0 + audience.shift.total())).abs() < 1e-5);
@@ -189,12 +189,9 @@ fn released_films_use_the_audience_and_unreleased_ones_similarity() {
     // The user rates director 7 above the crowd, so above the 5.0 audience.
     assert!(audience.rating > 6.0, "{audience:?}");
 
-    // Without signals, both are scored by similarity alone, as before.
-    let plain = scoring::rank(&p, &candidates);
-    let with_nothing = scoring::rank_with(&p, &Signals::default(), &candidates);
-    for (a, b) in plain.iter().zip(&with_nothing) {
-        assert_eq!(a.score, b.score);
-        assert_eq!(a.breakdown.rating, a.breakdown.similarity);
+    // Without signals, both are scored by similarity alone.
+    for ranked in scoring::rank(&p, &Signals::default(), &candidates) {
+        assert_eq!(ranked.breakdown.rating, ranked.breakdown.similarity);
     }
 }
 
@@ -204,7 +201,6 @@ fn labelled(audience_share: f32, closest_similarity: f32, neighbours: usize) -> 
         similarity: 7.0,
         neighbours,
         closest_similarity,
-        overall_share: 0.2,
         track_record: None,
         unreleased: 7.0,
         audience: None,

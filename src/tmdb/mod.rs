@@ -115,12 +115,6 @@ impl TmdbClient {
         }
     }
 
-    /// One page of movies releasing soon, from `/movie/upcoming`.
-    pub async fn upcoming(&self, page: u32) -> Result<Page<Movie>> {
-        self.get("/movie/upcoming", &[("page", page.to_string())])
-            .await
-    }
-
     /// One page of currently popular movies, from `/movie/popular`.
     pub async fn popular(&self, page: u32) -> Result<Page<Movie>> {
         self.get("/movie/popular", &[("page", page.to_string())])

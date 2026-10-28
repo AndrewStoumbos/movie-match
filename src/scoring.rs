@@ -110,9 +110,6 @@ pub struct Breakdown {
     pub neighbours: usize,
     /// Cosine similarity of the closest of them, 0 to 1 (0 with none).
     pub closest_similarity: f32,
-    /// How much of the similarity rating is the user's overall average, 0 to 1
-    /// (see [`Prediction::overall_share`]).
-    pub overall_share: f32,
     /// The track-record nudge, when the film has an estimate.
     pub track_record: Option<TrackRecordNudge>,
     /// The unreleased formula: `similarity` plus the nudge, 0 to 10.
@@ -235,7 +232,6 @@ pub fn breakdown(prediction: &Prediction, movie: &MovieDetails, signals: &Signal
         similarity,
         neighbours: prediction.neighbours.len(),
         closest_similarity: prediction.neighbours.first().map_or(0.0, |n| n.similarity),
-        overall_share: prediction.overall_share,
         track_record,
         unreleased,
         audience,
@@ -257,12 +253,6 @@ pub struct Match<'a> {
     /// Features shared with `closest_liked`, strongest first, e.g. `director Denis Villeneuve`.
     pub reasons: Vec<String>,
     pub breakdown: Breakdown,
-}
-
-/// How likely the user is to enjoy `movie`, from 0 (unlikely) to 100 (very likely),
-/// from similarity alone.
-pub fn score(profile: &TasteProfile, movie: &MovieDetails) -> u8 {
-    score_detailed(profile, movie).score
 }
 
 /// One rated movie among a candidate's nearest neighbours.
@@ -366,12 +356,9 @@ pub fn predict<'a>(profile: &'a TasteProfile, candidate: &Vector) -> Prediction<
     }
 }
 
-/// [`score_detailed_with`] from similarity alone.
-pub fn score_detailed<'a>(profile: &'a TasteProfile, movie: &MovieDetails) -> Match<'a> {
-    score_detailed_with(profile, &Signals::default(), movie)
-}
-
-pub fn score_detailed_with<'a>(
+/// How likely the user is to enjoy `movie`, and why. `Signals::default()` scores by
+/// similarity alone.
+pub fn score_detailed<'a>(
     profile: &'a TasteProfile,
     signals: &Signals,
     movie: &MovieDetails,
@@ -423,16 +410,7 @@ pub struct ExplainedNeighbour {
     pub shared: Vec<String>,
 }
 
-/// [`explain_with`] from similarity alone.
-pub fn explain(profile: &TasteProfile, movie: &MovieDetails) -> Explanation {
-    explain_with(profile, &Signals::default(), movie)
-}
-
-pub fn explain_with(
-    profile: &TasteProfile,
-    signals: &Signals,
-    movie: &MovieDetails,
-) -> Explanation {
+pub fn explain(profile: &TasteProfile, signals: &Signals, movie: &MovieDetails) -> Explanation {
     let candidate = profile.vectorize(movie);
     let prediction = predict(profile, &candidate);
     let labels = features::labels(movie, profile.weights());
@@ -480,24 +458,15 @@ pub struct Ranked {
     pub breakdown: Breakdown,
 }
 
-/// [`rank_with`] from similarity alone.
-pub fn rank(profile: &TasteProfile, candidates: &[MovieDetails]) -> Vec<Ranked> {
-    rank_with(profile, &Signals::default(), candidates)
-}
-
 /// Scores every candidate the user hasn't already rated, best match first
 /// (ties broken by title).
-pub fn rank_with(
-    profile: &TasteProfile,
-    signals: &Signals,
-    candidates: &[MovieDetails],
-) -> Vec<Ranked> {
+pub fn rank(profile: &TasteProfile, signals: &Signals, candidates: &[MovieDetails]) -> Vec<Ranked> {
     let summary = |r: &RatedVector| (r.title.clone(), r.rating);
     let mut ranked: Vec<Ranked> = candidates
         .iter()
         .filter(|movie| !profile.has_rated(movie.id))
         .map(|movie| {
-            let found = score_detailed_with(profile, signals, movie);
+            let found = score_detailed(profile, signals, movie);
             Ranked {
                 movie: movie.clone(),
                 score: found.score,

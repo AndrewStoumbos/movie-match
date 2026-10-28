@@ -106,7 +106,7 @@ fn trimming_unused_credits_keeps_features_and_labels() {
     let weights = FieldWeights::default();
     let full = fixture();
     let mut trimmed = full.clone();
-    features::trim_to_used(&mut trimmed, &weights);
+    features::trim_keeping_cast(&mut trimmed, &weights, 0);
 
     assert_eq!(trimmed.credits.cast.len(), weights.cast_limit);
     assert!(trimmed

@@ -17,8 +17,8 @@ movies the user likes. See README.md for the roadmap.
   (1 − share) × unreleased`, `share = votes / (votes + 100)` (`blend`,
   `AUDIENCE_VOTES_HALF`). Released: audience score + `AudienceShift` prediction.
   Unreleased: the similarity rating + `TRACK_RECORD_NUDGE` × (track-record estimate −
-  typical) (`nudged`). `Signals` carries the shift and `TrackRecords`; the `_with`
-  functions take them, the plain ones use similarity alone. `Breakdown::basis` labels a
+  typical) (`nudged`). `Signals` carries the shift and `TrackRecords`;
+  `score_detailed`, `explain` and `rank` take them (`Signals::default()` is similarity alone). `Breakdown::basis` labels a
   score Estimate / EarlyAudience / Audience by audience share (`ESTIMATE_BELOW`,
   `AUDIENCE_FROM`); `is_unusual` flags films whose closest rated movie is below
   `UNUSUAL_SIMILARITY` (chosen from real data) or with few neighbours. The similarity rating

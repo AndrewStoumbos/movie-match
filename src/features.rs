@@ -149,16 +149,11 @@ pub fn extract(movie: &MovieDetails, weights: &FieldWeights) -> Features {
     features
 }
 
-/// Drops the credits [`extract`] never reads (crew other than directors and writers,
-/// cast past `weights.cast_limit`), so holding many movies takes far less memory.
-/// Features and labels come out the same.
-pub fn trim_to_used(movie: &mut MovieDetails, weights: &FieldWeights) {
-    trim_keeping_cast(movie, weights, weights.cast_limit);
-}
-
-/// Like [`trim_to_used`], but keeps the top `max(weights.cast_limit, cast_limit)`
-/// billed actors, for callers that also read cast past `weights.cast_limit`
-/// (e.g. [`crate::quality::credits`] with a larger `cast_limit`).
+/// Drops the credits [`extract`] never reads (crew other than directors and writers),
+/// keeping the top `max(weights.cast_limit, cast_limit)` billed actors, so holding many
+/// movies takes far less memory. Features and labels come out the same. A
+/// `cast_limit` above `weights.cast_limit` is for callers that also read more cast
+/// (e.g. [`crate::quality::credits`]); 0 keeps just what [`extract`] uses.
 pub fn trim_keeping_cast(movie: &mut MovieDetails, weights: &FieldWeights, cast_limit: usize) {
     movie
         .credits

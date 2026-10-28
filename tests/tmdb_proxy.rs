@@ -33,7 +33,7 @@ async fn local_client_ignores_proxy_env_vars() {
     let client = local_client(base);
 
     let page = client
-        .upcoming(1)
+        .popular(1)
         .await
         .expect("request bypasses the proxy and reaches the stand-in server");
     assert!(page.results.is_empty());

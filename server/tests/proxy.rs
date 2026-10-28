@@ -126,6 +126,7 @@ async fn requests_the_app_never_makes_are_refused() {
 
     for path in [
         "/tmdb/account/1",
+        "/tmdb/movie/upcoming",
         "/tmdb/movie/7/videos",
         "/tmdb/movie/abc",
         "/other",

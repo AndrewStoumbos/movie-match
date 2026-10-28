@@ -65,9 +65,7 @@ pub fn max_age(path: &str) -> Option<Duration> {
     let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
     let number = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
     match parts.as_slice() {
-        ["movie", "popular" | "upcoming"] | ["discover", "movie"] | ["search", "movie"] => {
-            Some(CATALOG_MAX_AGE)
-        }
+        ["movie", "popular"] | ["discover", "movie"] | ["search", "movie"] => Some(CATALOG_MAX_AGE),
         ["movie", id] if number(id) => Some(DETAILS_MAX_AGE),
         ["person", id, "movie_credits"] if number(id) => Some(FILMOGRAPHY_MAX_AGE),
         _ => None,
