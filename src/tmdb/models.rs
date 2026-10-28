@@ -14,13 +14,7 @@ pub struct Movie {
     pub id: u64,
     pub title: String,
     #[serde(default)]
-    pub overview: String,
-    #[serde(default)]
     pub release_date: String,
-    #[serde(default)]
-    pub genre_ids: Vec<u32>,
-    #[serde(default)]
-    pub vote_average: f32,
 }
 
 /// Full details for one movie, from `/movie/{id}?append_to_response=keywords,credits`.

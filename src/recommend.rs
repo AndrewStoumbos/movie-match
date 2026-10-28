@@ -65,7 +65,7 @@ pub enum Stage {
 }
 
 /// Ranks the catalog's upcoming and recent releases for one user (see
-/// [`scoring::rank_with`]), with their difference from the audience and the
+/// [`scoring::rank`]), with their difference from the audience and the
 /// candidates' cast and crew track records.
 pub async fn rank_upcoming(
     fetcher: &Fetcher,
@@ -94,8 +94,8 @@ pub async fn rank_upcoming_reporting(
     let candidates: Vec<&MovieDetails> = catalog.upcoming.iter().chain(&catalog.recent).collect();
     let signals = signals(fetcher, &resolved, &candidates, options.weights, &report).await?;
     report(Stage::Scoring);
-    let ranked = scoring::rank_with(&profile, &signals, &catalog.upcoming);
-    let recent = scoring::rank_with(&profile, &signals, &catalog.recent);
+    let ranked = scoring::rank(&profile, &signals, &catalog.upcoming);
+    let recent = scoring::rank(&profile, &signals, &catalog.recent);
     Ok(Ranking {
         resolved,
         ranked,
@@ -329,7 +329,7 @@ pub async fn explain_movie(
         .chain([&movie])
         .collect();
     let signals = signals(fetcher, &resolved, &candidates, options.weights, &|_| {}).await?;
-    let explanation = scoring::explain_with(&profile, &signals, &movie);
+    let explanation = scoring::explain(&profile, &signals, &movie);
     Ok(Some((movie, explanation)))
 }
 

@@ -3,7 +3,8 @@ mod common;
 use common::{
     favourites, filler_dramas, movie, profile, rated, Spec, COMEDY, DRAMA, HORROR, ROMANCE,
 };
-use movie_match::scoring::{rank, score, score_detailed, OVERALL_SHRINK, SIMILARITY_POWER};
+use movie_match::profile::TasteProfile;
+use movie_match::scoring::{rank, score_detailed, Signals, OVERALL_SHRINK, SIMILARITY_POWER};
 use movie_match::tmdb::MovieDetails;
 
 fn comedy(id: u64, director: u64) -> MovieDetails {
@@ -30,6 +31,11 @@ fn horror(id: u64, director: u64) -> MovieDetails {
             ..Spec::default()
         },
     )
+}
+
+/// `movie`'s score from similarity alone.
+fn score(profile: &TasteProfile, movie: &MovieDetails) -> u8 {
+    score_detailed(profile, &Signals::default(), movie).score
 }
 
 #[test]
@@ -69,8 +75,8 @@ fn each_movie_is_predicted_from_its_own_similar_ratings() {
     let candidates = [new_comedy.clone(), new_horror.clone()];
     let p = profile(&rated_movies, &candidates, &filler_dramas(5));
 
-    let comedy_score = score_detailed(&p, &new_comedy);
-    let horror_score = score_detailed(&p, &new_horror);
+    let comedy_score = score_detailed(&p, &Signals::default(), &new_comedy);
+    let horror_score = score_detailed(&p, &Signals::default(), &new_horror);
     let average = 60; // (9 + 10 + 3 + 2) / 4 × 10
 
     assert!(comedy_score.score > average, "{}", comedy_score.score);
@@ -121,7 +127,7 @@ fn unrelated_movie_gets_your_average_rating() {
             ..Spec::default()
         },
     );
-    let found = score_detailed(&p, &unrelated);
+    let found = score_detailed(&p, &Signals::default(), &unrelated);
     assert_eq!(found.score, 60);
     assert!(found.closest_liked.is_none());
     assert!(found.reasons.is_empty());
@@ -154,8 +160,8 @@ fn rare_shared_features_count_more_than_common_ones() {
         &filler_dramas(20),
     );
 
-    let toward_low = movie_match::scoring::explain(&p, &like_low);
-    let toward_high = movie_match::scoring::explain(&p, &like_high);
+    let toward_low = movie_match::scoring::explain(&p, &Signals::default(), &like_low);
+    let toward_high = movie_match::scoring::explain(&p, &Signals::default(), &like_high);
     assert_eq!(toward_low.neighbours.len(), 2);
     // The shared director decides which rating dominates the weighted average.
     assert!(
@@ -198,7 +204,7 @@ fn reasons_list_the_strongest_shared_features_first() {
         &filler_dramas(10),
     );
 
-    let found = score_detailed(&p, &candidate);
+    let found = score_detailed(&p, &Signals::default(), &candidate);
     assert_eq!(
         found.reasons,
         ["director Director 7", "keyword \"kw500\"", "genre Genre 18"]
@@ -227,7 +233,7 @@ fn rank_skips_rated_movies_and_sorts_best_first() {
         &filler_dramas(5),
     );
 
-    let titles: Vec<_> = rank(&p, &candidates)
+    let titles: Vec<_> = rank(&p, &Signals::default(), &candidates)
         .into_iter()
         .map(|r| r.movie.id)
         .collect();
@@ -283,7 +289,7 @@ fn explain_lists_neighbours_with_relative_weights() {
         &filler_dramas(5),
     );
 
-    let explanation = movie_match::scoring::explain(&p, &candidate);
+    let explanation = movie_match::scoring::explain(&p, &Signals::default(), &candidate);
     assert_eq!(explanation.score, score(&p, &candidate));
     assert_eq!(explanation.neighbours.len(), 2);
     let first = &explanation.neighbours[0];
@@ -327,7 +333,7 @@ fn one_faint_neighbour_cannot_decide_the_score() {
         &filler_dramas(40),
     );
 
-    let explanation = movie_match::scoring::explain(&p, &candidate);
+    let explanation = movie_match::scoring::explain(&p, &Signals::default(), &candidate);
     assert_eq!(explanation.neighbours.len(), 1);
     assert!(
         explanation.neighbours[0].similarity < 0.02,
@@ -383,7 +389,7 @@ fn faint_matches_fall_back_on_the_neighbours_ratings_not_every_rating() {
         &filler_dramas(40),
     );
 
-    let explanation = movie_match::scoring::explain(&p, &candidate);
+    let explanation = movie_match::scoring::explain(&p, &Signals::default(), &candidate);
     assert_eq!(explanation.neighbours.len(), 10);
     assert!(
         explanation.neighbours[0].similarity < 0.08,
@@ -439,7 +445,7 @@ fn more_tied_faint_matches_than_neighbours_all_count_whatever_the_file_order() {
     let comedies: Vec<_> = (0..20).map(|i| comedy(700 + i, 800 + i)).collect();
     let explain = |rated_movies: &[_]| {
         let p = profile(rated_movies, std::slice::from_ref(&candidate), &comedies);
-        movie_match::scoring::explain(&p, &candidate)
+        movie_match::scoring::explain(&p, &Signals::default(), &candidate)
     };
     let in_order = explain(&rated_movies);
     let in_reverse = explain(&reversed);
@@ -510,7 +516,7 @@ fn movies_tied_for_the_last_neighbour_place_split_it() {
     );
     let comedies: Vec<_> = (0..20).map(|i| comedy(700 + i, 800 + i)).collect();
     let p = profile(&rated_movies, std::slice::from_ref(&candidate), &comedies);
-    let explanation = movie_match::scoring::explain(&p, &candidate);
+    let explanation = movie_match::scoring::explain(&p, &Signals::default(), &candidate);
 
     assert_eq!(explanation.neighbours.len(), 26);
     assert_eq!(explanation.neighbours[0].title, "Close");
@@ -560,7 +566,7 @@ fn closer_neighbours_count_by_similarity_squared() {
         &filler_dramas(20),
     );
 
-    let explanation = movie_match::scoring::explain(&p, &candidate);
+    let explanation = movie_match::scoring::explain(&p, &Signals::default(), &candidate);
     let [first, second] = explanation.neighbours.as_slice() else {
         panic!("expected two neighbours");
     };
@@ -596,7 +602,7 @@ fn equally_similar_ratings_count_the_same_however_low() {
         &filler_dramas(5),
     );
 
-    let explanation = movie_match::scoring::explain(&p, &candidate);
+    let explanation = movie_match::scoring::explain(&p, &Signals::default(), &candidate);
     let weights: Vec<_> = explanation.neighbours.iter().map(|n| n.weight).collect();
     assert_eq!(weights.len(), 2);
     assert!((weights[1] - weights[0]).abs() < 1e-6, "{weights:?}");

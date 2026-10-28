@@ -35,9 +35,9 @@ async fn http_error_status_does_not_leak_key() {
         serve_once("HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
     let client = local_client(base);
 
-    let err = client.upcoming(1).await.expect_err("401 is an error");
+    let err = client.popular(1).await.expect_err("401 is an error");
 
-    assert!(format!("{err:#}").contains("/movie/upcoming"));
+    assert!(format!("{err:#}").contains("/movie/popular"));
     assert!(format!("{err:#}").contains("401"));
     assert_key_not_leaked(&err);
 }
