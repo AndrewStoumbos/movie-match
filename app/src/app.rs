@@ -153,7 +153,7 @@ impl MovieMatchApp {
         if let Some(path) = import {
             // Imports, then ranks (or asks for an API key first).
             app.import_file(&cc.egui_ctx, &path);
-        } else if app.api_key().is_none() {
+        } else if !app.has_tmdb() {
             app.tab = Tab::Settings;
         } else if app.ratings.is_some() {
             app.start_ranking(&cc.egui_ctx, false);
@@ -172,6 +172,26 @@ impl MovieMatchApp {
             .filter(|key| !key.trim().is_empty())
     }
 
+    /// The Movie Match server to use instead of TMDB: the saved one if it looks like a
+    /// web address, or else `MOVIE_MATCH_SERVER` from the environment (which
+    /// `cargo dev` sets).
+    fn server_url(&self) -> Option<String> {
+        let web = |url: &str| url.starts_with("http://") || url.starts_with("https://");
+        let saved = self.settings.server_url.trim();
+        if !saved.is_empty() {
+            return web(saved).then(|| saved.to_string());
+        }
+        std::env::var("MOVIE_MATCH_SERVER")
+            .ok()
+            .map(|url| url.trim().to_string())
+            .filter(|url| web(url))
+    }
+
+    /// Whether the app can look movies up: through a server, or with a key.
+    fn has_tmdb(&self) -> bool {
+        self.server_url().is_some() || self.api_key().is_some()
+    }
+
     fn options(&self) -> Options {
         Options {
             catalog: CatalogOptions {
@@ -186,14 +206,19 @@ impl MovieMatchApp {
         }
     }
 
-    /// A TMDB fetcher for one task, or `None` (with a notice) when there's no key.
+    /// A TMDB fetcher for one task, or `None` (with a notice) when there's neither a
+    /// server nor a key. A server, when set, wins over a key.
     fn fetcher(&mut self, refresh: bool) -> Option<Arc<Fetcher>> {
-        let Some(key) = self.api_key() else {
-            self.notice = Some(Notice::Error(
-                "Add your TMDB API key in Settings first.".into(),
-            ));
-            self.tab = Tab::Settings;
-            return None;
+        let client = match (self.server_url(), self.api_key()) {
+            (Some(url), _) => TmdbClient::via_server(&url),
+            (None, Some(key)) => TmdbClient::new(key),
+            (None, None) => {
+                self.notice = Some(Notice::Error(
+                    "Add a Movie Match server or a TMDB API key in Settings first.".into(),
+                ));
+                self.tab = Tab::Settings;
+                return None;
+            }
         };
         let cache = self.settings.use_cache.then(|| {
             let cache = DiskCache::new(self.store.cache_dir());
@@ -203,7 +228,7 @@ impl MovieMatchApp {
                 cache
             }
         });
-        Some(Arc::new(Fetcher::new(TmdbClient::new(key), cache)))
+        Some(Arc::new(Fetcher::new(client, cache)))
     }
 
     fn start_ranking(&mut self, ctx: &egui::Context, refresh: bool) {
@@ -516,7 +541,7 @@ impl MovieMatchApp {
 
     /// What a screen needs before it can show anything: a key, then ratings.
     fn missing_setup(&self) -> Option<Action> {
-        if self.api_key().is_none() {
+        if !self.has_tmdb() {
             Some(Action::OpenTab(Tab::Settings))
         } else if self.ratings.is_none() {
             Some(Action::Import)
@@ -878,6 +903,39 @@ impl MovieMatchApp {
         egui::ScrollArea::vertical()
             .auto_shrink(false)
             .show(ui, |ui| {
+                section(ui, "Movie Match server", |ui| {
+                    ui.label(
+                        "Optional. With a server, Movie Match needs no TMDB API key: the \
+                         server looks movies up with its own.",
+                    );
+                    ui.horizontal(|ui| {
+                        settings_changed |= ui
+                            .add(
+                                egui::TextEdit::singleline(&mut self.settings.server_url)
+                                    .hint_text("http://127.0.0.1:8765")
+                                    .desired_width(320.0),
+                            )
+                            .changed();
+                    });
+                    let typed = !self.settings.server_url.trim().is_empty();
+                    if typed && self.server_url().is_none() {
+                        ui.colored_label(
+                            ui.visuals().warn_fg_color,
+                            "Start the address with http:// or https://. Until then, the API \
+                             key below is used.",
+                        );
+                    } else if typed {
+                        ui.label(RichText::new("Using this server instead of an API key.").weak());
+                    } else if let Some(url) = self.server_url() {
+                        ui.label(
+                            RichText::new(format!(
+                                "Using {url} from MOVIE_MATCH_SERVER instead of an API key."
+                            ))
+                            .weak(),
+                        );
+                    }
+                });
+
                 section(ui, "TMDB API key", |ui| {
                     let saved = !self.settings.api_key.trim().is_empty();
                     let status = if saved {

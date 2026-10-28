@@ -71,9 +71,13 @@ pub fn is_not_found(err: &anyhow::Error) -> bool {
 
 pub struct TmdbClient {
     http: reqwest::Client,
-    api_key: String,
+    /// `None` when talking to a Movie Match server, which adds its own key.
+    api_key: Option<String>,
     base_url: String,
 }
+
+/// Where a Movie Match server serves TMDB requests, under its address.
+pub const SERVER_TMDB_PATH: &str = "/tmdb";
 
 impl TmdbClient {
     pub fn new(api_key: String) -> Self {
@@ -89,8 +93,25 @@ impl TmdbClient {
     pub fn with_base_url(http: reqwest::Client, api_key: String, base_url: String) -> Self {
         Self {
             http,
-            api_key,
+            api_key: Some(api_key),
             base_url,
+        }
+    }
+
+    /// A client that asks the Movie Match server at `server_url` (e.g.
+    /// `http://127.0.0.1:8765`) instead of TMDB. It sends no API key: the server
+    /// holds one and passes TMDB's answers through.
+    pub fn via_server(server_url: &str) -> Self {
+        Self::via_server_using(reqwest::Client::new(), server_url)
+    }
+
+    /// [`Self::via_server`] through `http`, e.g. one that ignores proxies in tests
+    /// (see [`Self::with_base_url`]).
+    pub fn via_server_using(http: reqwest::Client, server_url: &str) -> Self {
+        Self {
+            http,
+            api_key: None,
+            base_url: format!("{}{SERVER_TMDB_PATH}", server_url.trim_end_matches('/')),
         }
     }
 
@@ -166,10 +187,11 @@ impl TmdbClient {
     /// The API key is sent as a query parameter and reqwest errors embed the request
     /// URL, so every error is stripped of its URL before it can reach a message or log.
     async fn get<T: DeserializeOwned>(&self, path: &str, params: &[(&str, String)]) -> Result<T> {
-        let response = self
-            .http
-            .get(format!("{}{path}", self.base_url))
-            .query(&[("api_key", self.api_key.as_str())])
+        let mut request = self.http.get(format!("{}{path}", self.base_url));
+        if let Some(key) = &self.api_key {
+            request = request.query(&[("api_key", key)]);
+        }
+        let response = request
             .query(params)
             .send()
             .await
