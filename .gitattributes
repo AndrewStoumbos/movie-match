@@ -1,0 +1,3 @@
+# Text files are stored and checked out with LF line endings on every OS, so
+# Windows checkouts match the repository and rustfmt.
+* text=auto eol=lf
