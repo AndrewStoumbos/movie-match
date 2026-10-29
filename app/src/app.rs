@@ -92,7 +92,7 @@ pub struct MovieMatchApp {
 
     ranking: Option<Ranking>,
     ranking_job: Option<Job<Ranking>>,
-    /// The step the ranking job is on, set from its background thread.
+    /// The step the current ranking job is on, set from its background thread.
     ranking_stage: Arc<Mutex<Option<Stage>>>,
     filter: String,
     show: ShowCount,
@@ -239,10 +239,10 @@ impl MovieMatchApp {
             return;
         };
         let options = self.options();
+        // A fresh cell per job: a replaced job keeps running until it finishes, and
+        // must not write its stages over this one's.
+        self.ranking_stage = Arc::default();
         let stage = Arc::clone(&self.ranking_stage);
-        if let Ok(mut current) = stage.lock() {
-            *current = None;
-        }
         let repaint = ctx.clone();
         let report = move |now: Stage| {
             if let Ok(mut current) = stage.lock() {
