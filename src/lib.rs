@@ -1,5 +1,6 @@
 //! movie-match: rates upcoming movies by how likely you are to enjoy them.
 
+pub mod benchmark;
 pub mod cache;
 pub mod catalog;
 pub mod config;

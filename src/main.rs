@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::Parser;
 
+use movie_match::benchmark;
 use movie_match::cache::DiskCache;
 use movie_match::catalog::CatalogOptions;
 use movie_match::config::Config;
@@ -115,6 +116,18 @@ struct Cli {
     /// With --evaluate-track-record: how many top-billed actors' records to use.
     #[arg(long, default_value_t = quality::TRACK_RECORD_CAST)]
     track_record_cast: usize,
+
+    /// Developer tool: benchmark the scoring against standard recommenders (baseline,
+    /// item k-NN, SVD) on a MovieLens download. Each user's newest 20% of ratings are
+    /// hidden and predicted from the older ones. Reuses --movielens-quality. Fetches
+    /// details for every rated movie: use a separate --cache-dir.
+    #[arg(long, value_name = "DIR", conflicts_with_all = ["explain", "evaluate", "evaluate_movielens", "evaluate_track_record"])]
+    benchmark_movielens: Option<PathBuf>,
+
+    /// With --benchmark-movielens: also write each method's MAE by film popularity to
+    /// this CSV file, for charts.
+    #[arg(long, value_name = "FILE", requires = "benchmark_movielens")]
+    benchmark_csv: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -151,6 +164,17 @@ async fn main() -> Result<()> {
         let quality_cast = cli.movielens_quality.then_some(cli.track_record_cast);
         return evaluate_movielens(&fetcher, dir, cli.movielens_ratings, quality_cast, &options)
             .await;
+    }
+    if let Some(dir) = &cli.benchmark_movielens {
+        let quality_cast = cli.movielens_quality.then_some(cli.track_record_cast);
+        return benchmark_movielens(
+            &fetcher,
+            dir,
+            quality_cast,
+            cli.benchmark_csv.as_deref(),
+            &options,
+        )
+        .await;
     }
     if let Some(dir) = &cli.evaluate_track_record {
         return evaluate_track_record(
@@ -536,6 +560,115 @@ async fn evaluate_movielens(
             );
         }
         println!("All rows are on the check users, which tuning never saw.");
+    }
+    Ok(())
+}
+
+async fn benchmark_movielens(
+    fetcher: &Fetcher,
+    dir: &std::path::Path,
+    quality_cast: Option<usize>,
+    csv: Option<&std::path::Path>,
+    options: &Options,
+) -> Result<()> {
+    let read = |name: &str| {
+        let path = dir.join(name);
+        std::fs::read_to_string(&path).with_context(|| format!("could not read {}", path.display()))
+    };
+    let links = movielens::parse_links(&read("links.csv")?)?;
+    let users = movielens::recent_ratings(&read("ratings.csv")?, &links, usize::MAX)?;
+    eprintln!(
+        "Fetching TMDB details for every movie {} users rated (cached after the first run), then benchmarking...",
+        users.len()
+    );
+    let result =
+        recommend::benchmark_movielens(fetcher, &users, options.weights, quality_cast).await?;
+    let report = &result.report;
+    println!(
+        "MovieLens benchmark: {} users, {} training ratings, {} hidden ratings predicted.",
+        report.users, report.train_ratings, report.predicted
+    );
+    println!(
+        "Each user's newest {:.0}% of ratings are hidden. The collaborative methods learn from every \
+         user's older ratings, Movie Match from that user's alone.",
+        benchmark::TEST_SHARE * 100.0
+    );
+    println!(
+        "TMDB had {} of the {} movies; {} hidden ratings of movies it lacks are left out for every method.",
+        result.movies_found, result.movies_requested, report.skipped
+    );
+    if let Some(people) = result.people {
+        println!("Movie Match's track records come from {people} people's earlier films.");
+    }
+    println!();
+
+    let optional =
+        |value: Option<f32>| value.map_or_else(|| "-".to_string(), |v| format!("{v:.3}"));
+    println!(
+        "  {:<26} {:>6} {:>6} {:>14} {:>8}",
+        "method",
+        "MAE",
+        "RMSE",
+        "mean Spearman",
+        format!("NDCG@{}", benchmark::NDCG_AT)
+    );
+    for (m, result) in report.overall.iter().enumerate() {
+        println!(
+            "  {:<26} {:>6.3} {:>6.3} {:>14} {:>8}",
+            result.name,
+            result.mae,
+            result.rmse,
+            optional(report.mean_spearman[m]),
+            optional(report.mean_ndcg[m])
+        );
+    }
+    println!(
+        "\nMAE/RMSE pool every prediction (1 to 10 scale). mean Spearman and NDCG average each \
+         user's own order match."
+    );
+
+    println!("\nMAE by how many training ratings the film has:");
+    print!("  {:<26}", "method");
+    for bucket in &report.by_popularity {
+        print!(" {:>8}", bucket.label);
+    }
+    println!();
+    for (m, name) in benchmark::METHODS.iter().enumerate() {
+        print!("  {name:<26}");
+        for bucket in &report.by_popularity {
+            if bucket.ratings == 0 {
+                print!(" {:>8}", "-");
+            } else {
+                print!(" {:>8.3}", bucket.mae[m]);
+            }
+        }
+        println!();
+    }
+    print!("  {:<26}", "hidden ratings");
+    for bucket in &report.by_popularity {
+        print!(" {:>8}", bucket.ratings);
+    }
+    println!();
+
+    if let Some(path) = csv {
+        // Quoted: method names can contain commas.
+        let methods: Vec<String> = benchmark::METHODS
+            .iter()
+            .map(|m| format!("\"{m}\""))
+            .collect();
+        let mut text = format!("popularity,ratings,{}\n", methods.join(","));
+        for bucket in &report.by_popularity {
+            let maes: Vec<String> = bucket.mae.iter().map(|m| format!("{m:.4}")).collect();
+            text.push_str(&format!(
+                "{},{},{}\n",
+                bucket.label,
+                bucket.ratings,
+                maes.join(",")
+            ));
+        }
+        std::fs::write(path, text)
+            .with_context(|| format!("could not write {}", path.display()))?;
+        eprintln!("Wrote {}", path.display());
     }
     Ok(())
 }
