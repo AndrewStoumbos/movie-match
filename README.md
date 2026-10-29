@@ -6,9 +6,11 @@ Written in Rust. Movie data comes from [TMDB](https://www.themoviedb.org/).
 
 ## Status
 
-Working CLI and desktop app. It matches your rated movies to TMDB, fetches upcoming
-releases, and ranks them with field-weighted TF-IDF similarity, explaining each match
-(see [How scoring works](#how-scoring-works)). TMDB data is cached between runs.
+Working CLI, desktop app and optional local server. It matches your rated movies to
+TMDB, then ranks upcoming and recent releases by predicted rating: similarity to what
+you rated and the cast and crew's track record before release, the audience score
+adjusted to your taste after (see [How scoring works](#how-scoring-works)). Any movie
+can be searched and its score explained. TMDB data is cached between runs.
 
 ## Desktop app
 
@@ -30,13 +32,18 @@ A Windows/macOS/Linux app with the same features as the CLI, no command line nee
 Screens:
 - **Upcoming:** upcoming releases ranked for you, with posters, scores, the closest
   movie you rated and why. Filter by title, show the top 20/50/all, **Reload** (reuse
-  downloads) or **Re-download** (fresh data from TMDB).
-- **Explain a movie:** any title, upcoming or not, with its predicted rating and the
-  rated movies behind it (the CLI's `--explain`).
+  downloads) or **Re-download** (fresh data from TMDB). **Why this score?** opens the
+  full breakdown.
+- **Recent:** the same for films released in the last months, scored mostly from
+  their audience score adjusted to your taste.
+- **Search any movie:** search TMDB, pick a result, and see its predicted rating and
+  how it was worked out (the CLI's `--explain`). For a movie you've rated, your rating
+  is shown next to the prediction, which leaves it out as if you hadn't seen it.
 - **My ratings:** what each rating matched on TMDB. **Fix** a wrong or missing match by
   pasting the TMDB link or id.
-- **Settings:** API key, how many pages of upcoming and popular movies to use, whether
-  to reuse downloads, and clearing downloaded data.
+- **Settings:** a Movie Match server or an API key, how many pages of upcoming, recent
+  and popular movies to use, an optional country for cinema releases, whether to reuse
+  downloads, and clearing downloaded data.
 
 Everything is kept on your computer in the app-data folder (`%APPDATA%\movie-match\data`
 on Windows): `settings.json` (including the API key), `ratings.json` (your imported
@@ -91,7 +98,8 @@ yet, so only do that on a network you trust.
    cargo run
    ```
 
-   Options: `--pages 3` rates more upcoming releases (20 per page),
+   Options: `--recent` ranks recent releases instead, `--region US` keeps upcoming films
+   with a cinema release in that country, `--pages 3` rates more upcoming releases (20 per page),
    `--reference-pages 10` uses more popular movies to judge how rare each feature is,
    `-n 50` shows more results. Downloads are cached in `data/cache/` (upcoming and
    popular lists for a day, movie details for 3 days); `--refresh` re-downloads and
@@ -176,6 +184,12 @@ ranking against each other.
 │       ├── app.rs              # state and screens
 │       ├── jobs.rs             # runs library calls in the background
 │       └── store.rs            # settings, ratings and cache in the app-data folder
+├── server/                     # Movie Match server crate (axum): holds the TMDB key
+│   ├── src/lib.rs              # allowed requests, shared cache, TMDB pass-through
+│   ├── src/main.rs             # command line: --listen, --cache-dir
+│   └── tests/proxy.rs          # against a local TMDB stand-in
+├── xtask/                      # `cargo dev`: builds and runs the server and the app
+├── .cargo/config.toml          # the `cargo dev` alias
 ├── src/
 │   ├── main.rs                 # CLI entry point
 │   ├── lib.rs                  # library root (modules below)
@@ -186,21 +200,31 @@ ranking against each other.
 │   ├── tfidf.rs                # IDF table, vectors, cosine similarity
 │   ├── scoring.rs              # scores, explanations and ranking (pure)
 │   ├── shift.rs                # your per-feature difference from the audience (pure)
+│   ├── quality.rs              # track records from cast and crew's earlier films (pure)
+│   ├── dates.rs                # YYYY-MM-DD calendar maths (pure)
+│   ├── evaluate.rs             # leave-one-out evaluation against your ratings (pure)
+│   ├── movielens.rs            # MovieLens ratings for evaluating across users (pure)
 │   ├── cache.rs                # JSON file cache with expiry
 │   ├── fetch.rs                # TMDB client + cached movie details
-│   ├── catalog.rs              # shared upcoming/popular movies and rarity table
-│   ├── recommend.rs            # per user: resolve ratings, rank the catalog
+│   ├── catalog.rs              # shared upcoming/recent/popular movies and rarity table
+│   ├── recommend.rs            # per user: resolve ratings, rank, search, explain
 │   └── tmdb/
 │       ├── mod.rs              # TMDB API client
 │       └── models.rs           # TMDB response types
 ├── tests/
 │   ├── scoring.rs              # scoring, dislikes, explanations, ranking
 │   ├── two_case.rs             # audience shift, track-record nudge, vote blend
+│   ├── quality.rs              # track-record estimates
+│   ├── evaluate.rs             # leave-one-out evaluation
+│   ├── movielens.rs            # MovieLens file parsing
 │   ├── features.rs             # feature extraction and TF-IDF
 │   ├── profile.rs              # ratings file parsing and validation
 │   ├── cache.rs                # disk cache behaviour
 │   ├── import.rs               # Letterboxd CSV parsing
-│   ├── recommend.rs            # explain lookups against a local TMDB stand-in
+│   ├── dates.rs                # release windows and date maths
+│   ├── catalog.rs              # loading the catalog when some ids are gone
+│   ├── discover.rs             # country codes and the discover query
+│   ├── recommend.rs            # search, explain, resolve and rank against a TMDB stand-in
 │   ├── tmdb_errors.rs          # TMDB errors never reveal the API key
 │   ├── tmdb_proxy.rs           # test clients bypass proxy env vars
 │   ├── common/                 # test movie builders, local TMDB stand-in server
@@ -209,6 +233,7 @@ ranking against each other.
 │   └── liked_movies.example.toml
 ├── .github/workflows/ci.yml    # build, lint and test on every push
 ├── .github/workflows/release.yml # Windows exe on every v* tag
+├── .github/workflows/agent.yml # agent review on every PR
 ├── .env.example
 └── .gitignore
 ```
@@ -222,11 +247,18 @@ ranking against each other.
 - [x] Explain each score
 - [x] Import Letterboxd ratings
 - [x] Desktop app
-- [x] Title search ("Explain a movie")
+- [x] Search any movie and explain its score
+- [x] Recent releases, scored from their audience adjusted to your taste
+- [x] Track records of cast and crew for unreleased films
+- [x] Local Movie Match server, so the app needs no TMDB key
+- [ ] Run the server on an always-on machine (needs rate limiting first)
 - [ ] Import from Trakt
 - [ ] General recommendations (released movies you haven't seen)
 - [ ] Tune field weights against MovieLens ratings
-- [ ] Plot-summary similarity (text embeddings)
 - [ ] Optional LLM pass for nuanced scores with a short explanation
 - [ ] "Did you like it?" feedback to improve future scores
 - [ ] Web UI
+
+Tried and left out: plot-summary similarity with text embeddings (MiniLM). Blended
+into the similarity rating it improved MovieLens accuracy by only about 0.02 points,
+too little for the extra model and download.
