@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use anyhow::{Context, Result};
 use futures::stream::{self, StreamExt};
 
+use crate::benchmark::{self, BenchmarkReport};
 use crate::catalog::{Catalog, CatalogOptions};
 use crate::evaluate::{self, Evaluation, UsersReport};
 use crate::features::{self, FieldWeights};
@@ -151,6 +152,105 @@ pub async fn evaluate_movielens(
     weights: FieldWeights,
     quality_cast: Option<usize>,
 ) -> Result<MovieLensEvaluation> {
+    let data = movielens_data(fetcher, users, weights, quality_cast).await?;
+    let per_user: Vec<Vec<RatedDetails>> = users
+        .values()
+        .map(|ratings| {
+            ratings
+                .iter()
+                .filter_map(|(id, rating)| {
+                    Some(RatedDetails {
+                        movie: data.details.get(id)?.clone(),
+                        rating: *rating,
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .filter(|rated| rated.len() >= 2)
+        .collect();
+    let evaluations =
+        evaluate::leave_one_out_each(&per_user, &data.idf, weights, data.estimates.as_ref());
+    Ok(MovieLensEvaluation {
+        movies_requested: data.requested,
+        movies_found: data.details.len(),
+        people: data.people,
+        report: evaluate::across_users(&evaluations),
+        nudge: data
+            .estimates
+            .as_ref()
+            .and_then(|e| evaluate::tune_nudge(&evaluations, e.typical)),
+    })
+}
+
+/// The result of [`benchmark_movielens`].
+#[derive(Debug, Clone)]
+pub struct MovieLensBenchmark {
+    /// Distinct movies across all the users' ratings.
+    pub movies_requested: usize,
+    /// How many of them TMDB has.
+    pub movies_found: usize,
+    /// People whose filmographies were needed for track records, if used.
+    pub people: Option<usize>,
+    pub report: BenchmarkReport,
+}
+
+/// Movie Match against standard recommenders on every user in `users` (all their
+/// ratings, newest first), hiding each user's newest [`benchmark::TEST_SHARE`] (see
+/// [`benchmark::run`]). Fetches TMDB details for every rated movie and builds the
+/// rarity table from them; with `quality_cast`, Movie Match also gets its track-record
+/// nudge, as in [`evaluate_movielens`].
+pub async fn benchmark_movielens(
+    fetcher: &Fetcher,
+    users: &UserRatings,
+    weights: FieldWeights,
+    quality_cast: Option<usize>,
+) -> Result<MovieLensBenchmark> {
+    let data = movielens_data(fetcher, users, weights, quality_cast).await?;
+    let split = benchmark::split(users, benchmark::TEST_SHARE, benchmark::MIN_TRAIN);
+    let report = benchmark::run(
+        &split,
+        &data.details,
+        &data.idf,
+        weights,
+        data.estimates.as_ref(),
+        BENCHMARK_SEED,
+    );
+    Ok(MovieLensBenchmark {
+        movies_requested: data.requested,
+        movies_found: data.details.len(),
+        people: data.people,
+        report,
+    })
+}
+
+/// Seeds SVD's starting factors, so benchmark runs repeat exactly.
+const BENCHMARK_SEED: u64 = 42;
+
+/// What the MovieLens evaluations need from TMDB.
+struct MovieLensData {
+    /// Distinct movies across all the users' ratings.
+    requested: usize,
+    /// Details for those TMDB has, trimmed to the fields scoring uses.
+    details: BTreeMap<u64, MovieDetails>,
+    /// Rarity table from those same movies.
+    idf: Idf,
+    /// Track-record estimates for every movie, with `quality_cast`.
+    estimates: Option<TrackRecords>,
+    /// People whose filmographies the estimates needed.
+    people: Option<usize>,
+}
+
+/// Fetches TMDB details for every movie in `users`, trimmed to the fields scoring
+/// uses, and builds the rarity table from those same movies. With `quality_cast` set,
+/// also estimates each movie's audience score from its directors', writers' and top
+/// `quality_cast` actors' earlier films (fetching their filmographies); the trimmed
+/// details then keep that many actors even past `weights.cast_limit`.
+async fn movielens_data(
+    fetcher: &Fetcher,
+    users: &UserRatings,
+    weights: FieldWeights,
+    quality_cast: Option<usize>,
+) -> Result<MovieLensData> {
     let ids: Vec<u64> = users
         .values()
         .flatten()
@@ -170,26 +270,9 @@ pub async fn evaluate_movielens(
         .map(|movie| features::extract(movie, &weights))
         .collect();
     let idf = Idf::from_documents(&documents);
-    let per_user: Vec<Vec<RatedDetails>> = users
-        .values()
-        .map(|ratings| {
-            ratings
-                .iter()
-                .filter_map(|(id, rating)| {
-                    Some(RatedDetails {
-                        movie: details.get(id)?.clone(),
-                        rating: *rating,
-                    })
-                })
-                .collect::<Vec<_>>()
-        })
-        .filter(|rated| rated.len() >= 2)
-        .collect();
 
-    let mut people_needed = None;
-    let mut typical_quality = None;
-    let estimates: Option<TrackRecords> = match quality_cast {
-        None => None,
+    let (estimates, people) = match quality_cast {
+        None => (None, None),
         Some(cast_limit) => {
             let people: Vec<u64> = details
                 .values()
@@ -198,14 +281,12 @@ pub async fn evaluate_movielens(
                 .collect::<BTreeSet<_>>()
                 .into_iter()
                 .collect();
-            people_needed = Some(people.len());
             let filmographies: HashMap<u64, Vec<CreditedFilm>> = people
                 .iter()
                 .zip(fetcher.filmographies(&people).await?)
                 .filter_map(|(person, films)| Some((*person, films?)))
                 .collect();
-            typical_quality = quality::typical_score(&filmographies);
-            typical_quality.map(|typical| TrackRecords {
+            let estimates = quality::typical_score(&filmographies).map(|typical| TrackRecords {
                 typical,
                 people: HashMap::new(),
                 estimates: details
@@ -216,17 +297,16 @@ pub async fn evaluate_movielens(
                         (movie.id, found.unwrap_or(typical))
                     })
                     .collect(),
-            })
+            });
+            (estimates, Some(people.len()))
         }
     };
-
-    let evaluations = evaluate::leave_one_out_each(&per_user, &idf, weights, estimates.as_ref());
-    Ok(MovieLensEvaluation {
-        movies_requested: ids.len(),
-        movies_found: details.len(),
-        people: people_needed,
-        report: evaluate::across_users(&evaluations),
-        nudge: typical_quality.and_then(|typical| evaluate::tune_nudge(&evaluations, typical)),
+    Ok(MovieLensData {
+        requested: ids.len(),
+        details,
+        idf,
+        estimates,
+        people,
     })
 }
 

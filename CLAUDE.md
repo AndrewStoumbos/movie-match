@@ -32,6 +32,12 @@ movies the user likes. See README.md for the roadmap.
   ridge-fitted shift per feature (`RIDGE`, light), solved in feature space by conjugate
   gradient (milliseconds for thousands of ratings; never build the n×n movie matrix).
   The exact dual solver stays for `evaluate`'s leave-one-out. Pure.
+- `src/benchmark.rs` `--benchmark-movielens`: Movie Match against `Collaborative` (baseline,
+  item k-NN, SVD with Surprise's defaults; SVD trains on stars and is seeded, so runs
+  repeat) on a time split (each user's newest `TEST_SHARE` hidden). Movie Match's
+  predictions go through `scoring::predict` + `breakdown`, the app's own path. Report:
+  MAE/RMSE, per-user Spearman and NDCG@10, MAE by film popularity. Results in
+  BENCHMARK.md. Pure.
 - `src/cache.rs`  `DiskCache`: JSON files with expiry under `data/cache/` (gitignored).
   Callers save with `put_or_warn`: a failed cache write is a warning, not an error
 - `src/fetch.rs`  `Fetcher`: TMDB client + cached movie details, keyed by

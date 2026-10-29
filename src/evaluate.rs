@@ -289,7 +289,7 @@ fn feature_shifts(rated: &[RatedDetails], overlap: &[Vec<f64>], hidden: usize) -
     })
 }
 
-fn summarize(name: &'static str, pairs: &[(f32, f32)], ranks: bool) -> MethodResult {
+pub(crate) fn summarize(name: &'static str, pairs: &[(f32, f32)], ranks: bool) -> MethodResult {
     let count = pairs.len();
     if count == 0 {
         return MethodResult {

@@ -159,7 +159,8 @@ Run the tests with `cargo test`.
    unreleased formula and one with 5,000 almost all the released one. Tested by
    leave-one-out on MovieLens (610 users), this misses by 1.26 points on average
    against 1.36 for similarity alone, and orders each user's films about twice as well.
-   `--explain` prints the breakdown. Constants live in `scoring.rs`.
+   Against standard recommenders (baseline, item k-NN, SVD) on a time split, see
+   [BENCHMARK.md](BENCHMARK.md). `--explain` prints the breakdown. Constants live in `scoring.rs`.
 8. **Explanation.** The output names the most similar liked movie and the three shared
    features that contributed most, plus the most similar disliked movie among the 20.
 
@@ -204,6 +205,7 @@ ranking against each other.
 │   ├── dates.rs                # YYYY-MM-DD calendar maths (pure)
 │   ├── evaluate.rs             # leave-one-out evaluation against your ratings (pure)
 │   ├── movielens.rs            # MovieLens ratings for evaluating across users (pure)
+│   ├── benchmark.rs            # vs baseline, item k-NN and SVD on MovieLens (pure)
 │   ├── cache.rs                # JSON file cache with expiry
 │   ├── fetch.rs                # TMDB client + cached movie details
 │   ├── catalog.rs              # shared upcoming/recent/popular movies and rarity table
@@ -217,6 +219,7 @@ ranking against each other.
 │   ├── quality.rs              # track-record estimates
 │   ├── evaluate.rs             # leave-one-out evaluation
 │   ├── movielens.rs            # MovieLens file parsing
+│   ├── benchmark.rs            # split, baseline, item k-NN, SVD, report
 │   ├── features.rs             # feature extraction and TF-IDF
 │   ├── profile.rs              # ratings file parsing and validation
 │   ├── cache.rs                # disk cache behaviour
