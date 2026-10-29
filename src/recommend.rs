@@ -16,7 +16,7 @@ use crate::quality::{self, TRACK_RECORD_CAST};
 use crate::scoring::{self, Explanation, Ranked, Signals, TrackRecords};
 use crate::shift::AudienceShift;
 use crate::tfidf::Idf;
-use crate::tmdb::{CreditedFilm, MovieDetails};
+use crate::tmdb::{CreditedFilm, Movie, MovieDetails};
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Options {
@@ -279,6 +279,16 @@ pub async fn evaluate_track_record(
     })
 }
 
+/// One movie's score for this user, spelled out.
+#[derive(Debug, Clone)]
+pub struct MovieExplanation {
+    pub movie: MovieDetails,
+    pub explanation: Explanation,
+    /// The user's own rating, when they've rated this movie. The explanation then
+    /// leaves that rating out, predicting from their other ratings as if unseen.
+    pub your_rating: Option<f32>,
+}
+
 /// Explains one movie's score for this user. `title`, trimmed of surrounding
 /// whitespace, is matched against the upcoming and recent releases first (ignoring
 /// case), then looked up with a TMDB search, so any movie works. `None` when nothing
@@ -288,7 +298,7 @@ pub async fn explain_movie(
     movies: &[RatedMovie],
     options: &Options,
     title: &str,
-) -> Result<Option<(MovieDetails, Explanation)>> {
+) -> Result<Option<MovieExplanation>> {
     let title = title.trim();
     let catalog = Catalog::load(fetcher, options.catalog).await?;
     let movie = match catalog
@@ -314,7 +324,57 @@ pub async fn explain_movie(
             }
         }
     };
-    let resolved = resolve(fetcher, movies).await?;
+    explain_details(fetcher, movies, options, &catalog, movie)
+        .await
+        .map(Some)
+}
+
+/// TMDB's matches for `query`, trimmed of surrounding whitespace, best first: the
+/// movies to pick from before [`explain_movie_id`].
+pub async fn search_movies(fetcher: &Fetcher, query: &str) -> Result<Vec<Movie>> {
+    let query = query.trim();
+    fetcher
+        .client()
+        .search_movies(query, None)
+        .await
+        .with_context(|| format!("searching TMDB for \"{query}\""))
+}
+
+/// Explains the score of TMDB movie `id` for this user, like [`explain_movie`]. `None`
+/// when TMDB has no such movie.
+pub async fn explain_movie_id(
+    fetcher: &Fetcher,
+    movies: &[RatedMovie],
+    options: &Options,
+    id: u64,
+) -> Result<Option<MovieExplanation>> {
+    let catalog = Catalog::load(fetcher, options.catalog).await?;
+    let Some(movie) = fetcher.details_if_found(&[id]).await?.pop().flatten() else {
+        return Ok(None);
+    };
+    explain_details(fetcher, movies, options, &catalog, movie)
+        .await
+        .map(Some)
+}
+
+/// `movie`'s explanation against `catalog`, which supplies the IDF and the typical
+/// track record.
+async fn explain_details(
+    fetcher: &Fetcher,
+    movies: &[RatedMovie],
+    options: &Options,
+    catalog: &Catalog,
+    movie: MovieDetails,
+) -> Result<MovieExplanation> {
+    let mut resolved = resolve(fetcher, movies).await?;
+    // A movie the user rated is predicted from their other ratings, as if unseen:
+    // otherwise it would be its own closest match and part of the fitted shift.
+    let your_rating = resolved
+        .rated
+        .iter()
+        .find(|r| r.movie.id == movie.id)
+        .map(|r| r.rating);
+    resolved.rated.retain(|r| r.movie.id != movie.id);
     let profile = TasteProfile::new(
         &resolved.rated,
         catalog.idf(&options.weights),
@@ -330,7 +390,11 @@ pub async fn explain_movie(
         .collect();
     let signals = signals(fetcher, &resolved, &candidates, options.weights, &|_| {}).await?;
     let explanation = scoring::explain(&profile, &signals, &movie);
-    Ok(Some((movie, explanation)))
+    Ok(MovieExplanation {
+        movie,
+        explanation,
+        your_rating,
+    })
 }
 
 /// What scoring uses beyond similarity: the user's [`AudienceShift`] and the

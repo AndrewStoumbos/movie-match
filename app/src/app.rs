@@ -12,9 +12,9 @@ use movie_match::fetch::Fetcher;
 use movie_match::import;
 use movie_match::profile::{self, RatedMovie, DISLIKED_UP_TO, LIKED_FROM};
 use movie_match::quality::Role;
-use movie_match::recommend::{self, Options, Ranking, Stage};
-use movie_match::scoring::{AudienceView, Basis, Breakdown, Explanation, Ranked, TrackRecordNudge};
-use movie_match::tmdb::{MovieDetails, Region, TmdbClient};
+use movie_match::recommend::{self, MovieExplanation, Options, Ranking, Stage};
+use movie_match::scoring::{AudienceView, Basis, Breakdown, Ranked, TrackRecordNudge};
+use movie_match::tmdb::{Movie, MovieDetails, Region, TmdbClient};
 use tokio::runtime::Runtime;
 
 use crate::jobs::Job;
@@ -71,7 +71,10 @@ enum Action {
     Rank {
         refresh: bool,
     },
-    Explain(String),
+    /// Search TMDB for movies matching the text.
+    Search(String),
+    /// Explain the score of one TMDB movie, by id.
+    Explain(u64),
     Import,
     /// Check a pasted TMDB id against TMDB, then save it for that rating row.
     CheckTmdbId(usize, u64),
@@ -80,7 +83,7 @@ enum Action {
     OpenTab(Tab),
 }
 
-type Explained = Option<(MovieDetails, Explanation)>;
+type Explained = Option<MovieExplanation>;
 
 pub struct MovieMatchApp {
     runtime: Runtime,
@@ -97,7 +100,10 @@ pub struct MovieMatchApp {
     filter: String,
     show: ShowCount,
 
-    explain_query: String,
+    search_query: String,
+    /// TMDB's matches for the last search, best first; `None` before any search.
+    search_results: Option<Vec<Movie>>,
+    search_job: Option<Job<Vec<Movie>>>,
     explained: Explained,
     explain_job: Option<Job<Explained>>,
 
@@ -143,7 +149,9 @@ impl MovieMatchApp {
             ranking_stage: Arc::default(),
             filter: String::new(),
             show: ShowCount::Top20,
-            explain_query: String::new(),
+            search_query: String::new(),
+            search_results: None,
+            search_job: None,
             explained: None,
             explain_job: None,
             key_input: String::new(),
@@ -255,12 +263,21 @@ impl MovieMatchApp {
         }));
     }
 
-    fn start_explain(&mut self, ctx: &egui::Context, title: String) {
-        let title = title.trim().to_string();
-        if title.is_empty() {
+    fn start_search(&mut self, ctx: &egui::Context, query: String) {
+        let query = query.trim().to_string();
+        if query.is_empty() {
             return;
         }
-        self.explain_query = title.clone();
+        let Some(fetcher) = self.fetcher(false) else {
+            return;
+        };
+        self.search_query = query.clone();
+        self.search_job = Some(Job::spawn(&self.runtime, ctx, async move {
+            recommend::search_movies(&fetcher, &query).await
+        }));
+    }
+
+    fn start_explain(&mut self, ctx: &egui::Context, id: u64) {
         self.tab = Tab::Explain;
         let Some(movies) = self.ratings.as_ref().map(|r| r.movies.clone()) else {
             self.notice = Some(Notice::Error("Import your ratings first.".into()));
@@ -272,7 +289,7 @@ impl MovieMatchApp {
         let options = self.options();
         self.explained = None;
         self.explain_job = Some(Job::spawn(&self.runtime, ctx, async move {
-            recommend::explain_movie(&fetcher, &movies, &options, &title).await
+            recommend::explain_movie_id(&fetcher, &movies, &options, id).await
         }));
     }
 
@@ -284,15 +301,19 @@ impl MovieMatchApp {
                 Err(err) => self.notice = Some(Notice::Error(err)),
             }
         }
+        if let Some(result) = self.search_job.as_ref().and_then(Job::poll) {
+            self.search_job = None;
+            match result {
+                Ok(found) => self.search_results = Some(found),
+                Err(err) => self.notice = Some(Notice::Error(err)),
+            }
+        }
         if let Some(result) = self.explain_job.as_ref().and_then(Job::poll) {
             self.explain_job = None;
             match result {
                 Ok(Some(found)) => self.explained = Some(found),
                 Ok(None) => {
-                    self.notice = Some(Notice::Info(format!(
-                        "No movie found for \"{}\".",
-                        self.explain_query
-                    )));
+                    self.notice = Some(Notice::Info("TMDB no longer has that movie.".into()));
                 }
                 Err(err) => self.notice = Some(Notice::Error(err)),
             }
@@ -434,7 +455,8 @@ impl MovieMatchApp {
     fn run(&mut self, ctx: &egui::Context, action: Action) {
         match action {
             Action::Rank { refresh } => self.start_ranking(ctx, refresh),
-            Action::Explain(title) => self.start_explain(ctx, title),
+            Action::Search(query) => self.start_search(ctx, query),
+            Action::Explain(id) => self.start_explain(ctx, id),
             Action::Import => {
                 let picked = rfd::FileDialog::new()
                     .set_title("Choose your Letterboxd ratings.csv")
@@ -462,6 +484,8 @@ impl MovieMatchApp {
             Some(self.stage_text())
         } else if self.explain_job.is_some() {
             Some("Working out a score…".into())
+        } else if self.search_job.is_some() {
+            Some("Searching TMDB…".into())
         } else if self.checking.is_some() {
             Some("Checking that TMDB id…".into())
         } else {
@@ -493,7 +517,7 @@ impl MovieMatchApp {
             for (tab, label) in [
                 (Tab::Upcoming, "Upcoming"),
                 (Tab::Recent, "Recent"),
-                (Tab::Explain, "Explain a movie"),
+                (Tab::Explain, "Search any movie"),
                 (Tab::Ratings, "My ratings"),
                 (Tab::Settings, "Settings"),
             ] {
@@ -689,7 +713,7 @@ impl MovieMatchApp {
                 for (i, ranked) in shown.enumerate() {
                     any = true;
                     if movie_card(ui, i + 1, ranked) {
-                        action = Some(Action::Explain(ranked.movie.title.clone()));
+                        action = Some(Action::Explain(ranked.movie.id));
                     }
                 }
                 if !any {
@@ -708,35 +732,85 @@ impl MovieMatchApp {
             return self.setup_prompt(ui, &needed);
         }
         let mut action = None;
-        ui.heading("Explain a movie's score");
-        ui.label("Type any title: an upcoming release or any movie on TMDB.");
+        ui.heading("Search any movie");
+        ui.label("Search TMDB for any movie, then pick one to see how it would score for you.");
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             let response = ui.add(
-                egui::TextEdit::singleline(&mut self.explain_query)
-                    .hint_text("e.g. Dune: Part Two")
+                egui::TextEdit::singleline(&mut self.search_query)
+                    .hint_text("e.g. Dune")
                     .desired_width(320.0),
             );
             let entered = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            let searching = self.search_job.is_some();
             let clicked = ui
-                .add_enabled(self.explain_job.is_none(), egui::Button::new("Explain"))
+                .add_enabled(!searching, egui::Button::new("Search"))
                 .clicked();
-            if (entered || clicked) && self.explain_job.is_none() {
-                action = Some(Action::Explain(self.explain_query.clone()));
+            if (entered || clicked) && !searching {
+                action = Some(Action::Search(self.search_query.clone()));
             }
         });
         ui.add_space(8.0);
-        if self.explain_job.is_some() {
-            ui.horizontal(|ui| {
-                ui.spinner();
-                ui.label("Working it out…");
+
+        let explained_id = self.explained.as_ref().map(|e| e.movie.id);
+        let explaining = self.explain_job.is_some();
+        // Your ratings by TMDB id, to mark the results you've seen.
+        let yours: HashMap<u64, f32> = self
+            .ratings
+            .iter()
+            .flat_map(|r| &r.movies)
+            .filter_map(|m| Some((m.tmdb_id?, m.rating())))
+            .collect();
+        ui.horizontal_top(|ui| {
+            if let Some(results) = &self.search_results {
+                ui.vertical(|ui| {
+                    ui.set_width(280.0);
+                    egui::ScrollArea::vertical()
+                        .id_salt("search_results")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            if results.is_empty() {
+                                ui.label("No TMDB movies match that search.");
+                            }
+                            for movie in results {
+                                let mut text =
+                                    format!("{} ({})", movie.title, year(&movie.release_date));
+                                if let Some(rating) = yours.get(&movie.id) {
+                                    text.push_str(&format!(
+                                        " · you rated {}",
+                                        rating_text(*rating)
+                                    ));
+                                }
+                                let picked = explained_id == Some(movie.id);
+                                let clicked = ui
+                                    .add_enabled(
+                                        !explaining,
+                                        egui::Button::selectable(picked, text).wrap(),
+                                    )
+                                    .clicked();
+                                if clicked {
+                                    action = Some(Action::Explain(movie.id));
+                                }
+                            }
+                        });
+                });
+                ui.separator();
+            }
+            ui.vertical(|ui| {
+                if explaining {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Working it out…");
+                    });
+                }
+                if let Some(explained) = &self.explained {
+                    egui::ScrollArea::vertical()
+                        .id_salt("explanation")
+                        .auto_shrink(false)
+                        .show(ui, |ui| explanation_view(ui, explained));
+                }
             });
-        }
-        if let Some((movie, explanation)) = &self.explained {
-            egui::ScrollArea::vertical()
-                .auto_shrink(false)
-                .show(ui, |ui| explanation_view(ui, movie, explanation));
-        }
+        });
         action
     }
 
@@ -1186,7 +1260,8 @@ fn movie_card(ui: &mut egui::Ui, position: usize, ranked: &Ranked) -> bool {
     explain
 }
 
-fn explanation_view(ui: &mut egui::Ui, movie: &MovieDetails, explanation: &Explanation) {
+fn explanation_view(ui: &mut egui::Ui, explained: &MovieExplanation) {
+    let (movie, explanation) = (&explained.movie, &explained.explanation);
     ui.horizontal_top(|ui| {
         poster(ui, movie);
         ui.add_space(8.0);
@@ -1201,6 +1276,17 @@ fn explanation_view(ui: &mut egui::Ui, movie: &MovieDetails, explanation: &Expla
                     explanation.predicted_rating
                 ));
             });
+            if let Some(rating) = explained.your_rating {
+                ui.label(
+                    RichText::new(format!("You rated it {}/10", rating_text(rating))).strong(),
+                );
+                ui.label(
+                    RichText::new(
+                        "The prediction leaves your rating out, as if you hadn't seen it.",
+                    )
+                    .weak(),
+                );
+            }
             if let Some(overview) = movie.overview.as_deref() {
                 if !overview.is_empty() {
                     ui.label(RichText::new(overview).weak());
