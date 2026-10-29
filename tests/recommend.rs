@@ -1,4 +1,5 @@
-//! `explain_movie` lookups, against a pre-filled cache and a local stand-in server.
+//! Searching, explaining, resolving and ranking, against a pre-filled cache and a
+//! local stand-in server.
 
 mod common;
 
@@ -19,7 +20,8 @@ use movie_match::fetch::{
 };
 use movie_match::profile::RatedMovie;
 use movie_match::recommend::{
-    explain_movie, rank_upcoming, rank_upcoming_reporting, resolve, Options, Resolved, Stage,
+    explain_movie, explain_movie_id, rank_upcoming, rank_upcoming_reporting, resolve,
+    search_movies, Options, Resolved, Stage,
 };
 use movie_match::tmdb::{CreditedFilm, MovieDetails};
 
@@ -94,7 +96,7 @@ async fn upcoming_match_ignores_surrounding_whitespace() {
         .await
         .expect("explain");
 
-    let (movie, _) = found.expect("matches the upcoming movie");
+    let movie = found.expect("matches the upcoming movie").movie;
     assert_eq!(movie.id, upcoming.id);
     let _ = fs::remove_dir_all(&dir);
 }
@@ -120,6 +122,127 @@ async fn search_fallback_sends_trimmed_title() {
         .expect("server saw the search request");
     assert!(request.starts_with("GET /search/movie?"), "{request}");
     assert_eq!(query_param(&request), "Past Lives");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn search_lists_every_match_in_tmdbs_order() {
+    let body = r#"{"page":1,"results":[
+        {"id":438631,"title":"Dune","release_date":"2021-09-15"},
+        {"id":841,"title":"Dune","release_date":"1984-12-14"},
+        {"id":693134,"title":"Dune: Part Two"}
+    ],"total_pages":1,"total_results":3}"#;
+    let (base, request) = serve_once_recording(json_response(body));
+    let fetcher = Fetcher::new(local_client(base), None);
+
+    let found = search_movies(&fetcher, "  Dune \n").await.expect("search");
+
+    let ids: Vec<u64> = found.iter().map(|m| m.id).collect();
+    assert_eq!(ids, [438631, 841, 693134]);
+    assert_eq!(found[1].release_date, "1984-12-14");
+    assert_eq!(found[2].release_date, "", "a missing date is empty");
+    let request = request
+        .recv_timeout(Duration::from_secs(5))
+        .expect("server saw the search request");
+    assert_eq!(query_param(&request), "Dune");
+}
+
+#[tokio::test]
+async fn explaining_by_id_scores_that_movie_even_outside_the_catalog() {
+    let dir = temp_dir("explain-id");
+    let cache = cache_with_upcoming(&dir, &[]);
+    let old = MovieDetails {
+        release_date: "1984-12-14".into(),
+        ..movie(
+            "Dune",
+            Spec {
+                id: 841,
+                ..Spec::default()
+            },
+        )
+    };
+    cache
+        .put(&details_cache_key(old.id), &old)
+        .expect("write details");
+    // Nothing listens here, so any request would fail the test.
+    let dead = TcpListener::bind("127.0.0.1:0")
+        .and_then(|l| l.local_addr())
+        .expect("reserve loopback port");
+    let fetcher = Fetcher::new(local_client(format!("http://{dead}")), Some(cache));
+
+    let found = explain_movie_id(&fetcher, &[], &Options::default(), 841)
+        .await
+        .expect("explain");
+
+    let movie = found.expect("explains the cached movie").movie;
+    assert_eq!(movie.id, 841);
+    assert_eq!(movie.release_date, "1984-12-14");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_movie_you_rated_is_predicted_from_your_other_ratings() {
+    let dir = temp_dir("explain-rated");
+    let cache = cache_with_upcoming(&dir, &[]);
+    for (id, title) in [(841, "Dune"), (900, "Other")] {
+        let details = movie(
+            title,
+            Spec {
+                id,
+                genres: vec![878],
+                ..Spec::default()
+            },
+        );
+        cache
+            .put(&details_cache_key(id), &details)
+            .expect("write details");
+    }
+    // Nothing listens here, so any request would fail the test.
+    let dead = TcpListener::bind("127.0.0.1:0")
+        .and_then(|l| l.local_addr())
+        .expect("reserve loopback port");
+    let fetcher = Fetcher::new(local_client(format!("http://{dead}")), Some(cache));
+    let rated = |id, rating| RatedMovie {
+        tmdb_id: Some(id),
+        rating: Some(rating),
+        ..RatedMovie::default()
+    };
+
+    let found = explain_movie_id(
+        &fetcher,
+        &[rated(841, 10.0), rated(900, 4.0)],
+        &Options::default(),
+        841,
+    )
+    .await
+    .expect("explain")
+    .expect("explains the rated movie");
+
+    assert_eq!(found.your_rating, Some(10.0));
+    let neighbours: Vec<&str> = found
+        .explanation
+        .neighbours
+        .iter()
+        .map(|n| n.title.as_str())
+        .collect();
+    assert_eq!(neighbours, ["Other"], "not its own neighbour");
+    assert_eq!(found.explanation.mean_rating, 4.0, "its rating left out");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn explaining_an_id_tmdb_does_not_have_is_none() {
+    let dir = temp_dir("explain-missing-id");
+    let cache = cache_with_upcoming(&dir, &[]);
+    let base =
+        serve_once("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    let fetcher = Fetcher::new(local_client(base), Some(cache));
+
+    let found = explain_movie_id(&fetcher, &[], &Options::default(), 99)
+        .await
+        .expect("a 404 is no movie, not an error");
+
+    assert!(found.is_none());
     let _ = fs::remove_dir_all(&dir);
 }
 

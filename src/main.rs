@@ -248,16 +248,21 @@ async fn explain(
     options: &Options,
     title: &str,
 ) -> Result<()> {
-    let Some((movie, explanation)) =
-        recommend::explain_movie(fetcher, movies, options, title).await?
-    else {
+    let Some(explained) = recommend::explain_movie(fetcher, movies, options, title).await? else {
         eprintln!("No movie found for \"{title}\"");
         return Ok(());
     };
+    let (movie, explanation) = (&explained.movie, &explained.explanation);
     println!(
         "{} [{}]: score {} (predicted {:.2}/10)",
         movie.title, movie.release_date, explanation.score, explanation.predicted_rating
     );
+    if let Some(rating) = explained.your_rating {
+        println!(
+            "You rated it {}/10. The prediction leaves that rating out, as if you hadn't seen it.",
+            rating_text(rating)
+        );
+    }
     print_breakdown(&explanation.breakdown);
     println!(
         "\nSimilarity rating {:.2}:",

@@ -53,7 +53,11 @@ movies the user likes. See README.md for the roadmap.
   in order; a given id TMDB answers 404 for becomes unmatched with id `None`, so one
   stale id can't fail every run), `rank_upcoming` and `explain_movie` (both fit the
   `AudienceShift` and fetch the catalog's track records, cached a month;
-  `rank_upcoming_reporting` also reports each `Stage` for the app's progress text). Futures must stay `Send` (the app runs them
+  `rank_upcoming_reporting` also reports each `Stage` for the app's progress text).
+  `search_movies` lists TMDB's matches and `explain_movie_id` explains the one picked
+  (the app's "Search any movie" tab; `None` on a 404). Both explain functions give a
+  `MovieExplanation`; a movie the user rated is left out of its own prediction (profile and
+  shift), and `your_rating` carries their rating. Futures must stay `Send` (the app runs them
   on a multi-threaded runtime): stream over owned items, not references.
 - I/O lives only in `tmdb/`, `cache.rs`, `fetch.rs`, `catalog.rs`, `recommend.rs`.
 - `src/tmdb/`     TMDB API client (`mod.rs`) and response types (`models.rs`)

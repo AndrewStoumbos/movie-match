@@ -157,12 +157,18 @@ impl TmdbClient {
 
     /// TMDB's best match for `title`, optionally narrowed to a release year.
     pub async fn search_movie(&self, title: &str, year: Option<u16>) -> Result<Option<Movie>> {
+        Ok(self.search_movies(title, year).await?.into_iter().next())
+    }
+
+    /// The first page of TMDB's matches for `title`, best first, optionally narrowed
+    /// to a release year.
+    pub async fn search_movies(&self, title: &str, year: Option<u16>) -> Result<Vec<Movie>> {
         let mut params = vec![("query", title.to_string())];
         if let Some(year) = year {
             params.push(("primary_release_year", year.to_string()));
         }
         let page: Page<Movie> = self.get("/search/movie", &params).await?;
-        Ok(page.results.into_iter().next())
+        Ok(page.results)
     }
 
     /// Genres, keywords and credits for one movie, fetched in a single request.
